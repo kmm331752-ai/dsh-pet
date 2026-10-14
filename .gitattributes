@@ -1,0 +1,15 @@
+# 统一换行符：仓库里一律 LF，Windows 脚本保留 CRLF
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.vbs text eol=crlf
+
+# 二进制素材，别做任何行尾或 diff 处理
+*.png binary
+*.webp binary
+*.apng binary
+*.gif binary
+*.ico binary
+
+# 让 GitHub 正确识别语言统计
+*.py linguist-language=Python

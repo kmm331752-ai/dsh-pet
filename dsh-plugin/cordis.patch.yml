@@ -1,0 +1,36 @@
+# DSH 桌宠开关 · profile 层
+#
+# 这是一个 bundle 补丁层：把开关插件作为一行插进 DSH 的 profile 组合。
+# 行内的 config 会原样传给 lib/index.js 的 apply(ctx, config)。
+#
+# ── 安装步骤 ────────────────────────────────────────────────────────────────
+#
+# 1. 把本目录链接到 profile 的 node_modules，让模块名能被解析到：
+#
+#      mklink /J "%USERPROFILE%\.dsh\profiles\node_modules\dsh-pet-toggle" "<本目录绝对路径>"
+#
+# 2. 把下面那段 `- insert:` 追加到 profile 的补丁层：
+#
+#      %USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml
+#
+# 3. 把 config 里两个路径改成你自己的。
+#
+# ── 注意 ────────────────────────────────────────────────────────────────────
+#
+# * Electron 桌面版**独占管理** desktop profile，`dsh plugin add` 会被拒绝
+#   （"profile is managed exclusively by the Electron application"），
+#   所以走手工链接 + 补丁行这条路。
+# * cordis.patch.yml 是**用户补丁层**，不碰 DSH 自身文件。
+# * 补丁是热加载的：改完 /dsh-pet/status 路由立刻生效。
+#   但**客户端按钮需要重启 DSH** 才会进模块图（这一点尚未验证成功，见 README）。
+
+- insert:
+    - id: dsh-pet-toggle
+      name: 'dsh-pet-toggle'
+      config:
+        # 桌宠程序目录（dsh_pet.py 所在目录）—— 改成你的绝对路径
+        petDir: 'C:\path\to\desktop-pet'
+        # pythonw.exe 的绝对路径，用它启动才不弹控制台
+        pythonPath: 'C:\path\to\pythonw.exe'
+        # 随 DSH 启动自动拉起桌宠（设 false 可关掉）
+        autostart: true

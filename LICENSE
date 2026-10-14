@@ -1,0 +1,50 @@
+MIT License
+
+Copyright (c) 2026 DSH 桌宠 contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────────────
+关于素材（重要）
+
+上面这份 MIT 许可覆盖的是**本项目的代码**。
+
+仓库里随附的角色素材各自归属其原作者，并各自适用自己的许可 —— 它们同样是
+MIT 或等价的宽松许可，与上面的条款兼容。逐个来源、作者与许可见
+`assets/ATTRIBUTION.md`。
+
+仓库**不包含**任何授权不明确或不兼容的素材。clawd-on-desk 的主题素材
+（calico / cloudling / whale-chan）已被 `.gitignore` 排除，原因见该文件的注释
+与 `assets/ATTRIBUTION.md`。加载器本身是代码，在 MIT 覆盖范围内。
+
+────────────────────────────────────────────────────────────────────────────────
+About the assets
+
+The MIT grant above covers **this project's code**.
+
+The bundled character assets belong to their respective authors and carry their
+own licenses. All of them are MIT or equivalently permissive, and therefore
+compatible with the terms above. Per-asset source, author and license are listed
+in `assets/ATTRIBUTION.md`.
+
+This repository deliberately **ships no asset whose licensing is unclear or
+incompatible**. The clawd-on-desk theme assets (calico / cloudling /
+whale-chan) are excluded via `.gitignore` — see that file's comments and
+`assets/ATTRIBUTION.md` for the reasoning. The theme *loader* is code and is
+covered by the MIT grant.
