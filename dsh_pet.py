@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import dataclasses
 import glob
 import json
 import math
 import os
+import random
 import socket
 import sys
 import threading
@@ -49,7 +51,30 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 DSH_HOME = os.environ.get("DSH_HOME") or os.path.join(os.path.expanduser("~"), ".dsh")
 PROJ_DIR = os.path.join(DSH_HOME, "storages", "session_projcache", "sessions")
 SESS_DIR = os.path.join(DSH_HOME, "sessions")
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pet_config.json")
+
+
+def app_dir() -> str:
+    """只读资源所在目录。
+
+    打包成单文件 exe 后，PyInstaller 会把资源解到临时目录（sys._MEIPASS），
+    源码运行就是脚本自己所在目录。
+    """
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def data_dir() -> str:
+    """可写目录：配置与相处记录放这儿。
+
+    exe 运行时解包目录是临时的，配置必须落在 exe 旁边才留得住。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_PATH = os.path.join(data_dir(), "pet_config.json")
 # 单实例锁用的本地端口（只绑 127.0.0.1，不对外）
 SINGLE_INSTANCE_PORT = 51937
 
@@ -70,6 +95,13 @@ PALETTE = {
     "failed":      dict(accent="#B93B37", label="出错重试", dot="#E8615C"),
     "celebrating": dict(accent="#2E9E63", label="已完成", dot="#5FC98B"),
     "offline":     dict(accent="#6B7075", label="离线",   dot="#9AA0A6"),
+    # ── 陪伴模式的状态（没有 DSH 任务时她自己过日子）──
+    "roaming":     dict(accent="#3F9E9E", label="溜达",   dot="#6FC7C7"),
+    "yawning":     dict(accent="#8A7BA8", label="犯困",   dot="#B3A6CC"),
+    "dozing":      dict(accent="#5E6E92", label="打盹",   dot="#8B9BC0"),
+    "sleeping":    dict(accent="#4A5568", label="睡着了", dot="#7A8699"),
+    "waking":      dict(accent="#C79A3C", label="刚醒",   dot="#E8C173"),
+    "petted":      dict(accent="#D2658F", label="好舒服", dot="#EE92B4"),
 }
 
 # 隐私模式下的通用副行（不泄露提示词内容）
@@ -89,21 +121,30 @@ CARD_LINE = (72, 78, 92, 255)
 TEXT_MAIN = (240, 243, 248, 255)
 TEXT_DIM = (152, 160, 176, 255)
 
-STATE_ORDER = ["idle", "thinking", "tools", "waiting", "failed", "celebrating", "offline"]
+STATE_ORDER = ["idle", "thinking", "tools", "waiting", "failed", "celebrating", "offline",
+               "roaming", "yawning", "dozing", "sleeping", "waking", "petted"]
 
 # 状态优先级：越小越优先成为「聚合状态」——
 # 等你回答最要紧（卡在你这），其次出错，再是干活
 STATE_RANK = {"waiting": 0, "failed": 1, "tools": 2, "thinking": 3, "celebrating": 4, "idle": 5}
 ACTIVE_STATES = ("waiting", "failed", "tools", "thinking")
 
+# 陪伴模式才用的状态：只有 DSH 那边一个活跃会话都没有时才会出现
+COMPANION_STATES = ("roaming", "yawning", "dozing", "sleeping", "waking", "petted")
+# 这些状态不该被 DSH 的任务状态覆盖掉（睡着了就别被"空闲"叫醒）
+COMPANION_HOLD = ("dozing", "sleeping", "waking", "petted")
+
 CELEBRATE_S = 6.0                # 完成庆祝持续秒数
 
 # 角色素材来自 1190fasheqi/dafeiyu-pet（MIT），见 assets/ATTRIBUTION.md
-ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+ASSETS = os.path.join(app_dir(), "assets")
 SKINS_DIR = os.path.join(ASSETS, "skins")
 VIEW_FOR_STATE = {"idle": "front", "thinking": "front", "tools": "side",
                   "waiting": "front", "failed": "front",
-                  "celebrating": "front", "offline": "back"}
+                  "celebrating": "front", "offline": "back",
+                  # 陪伴模式：溜达用侧身，睡着翻到背面（缩成一团的感觉）
+                  "roaming": "side", "yawning": "front", "dozing": "front",
+                  "sleeping": "back", "waking": "front", "petted": "front"}
 _VIEW_CACHE: dict = {}
 _GLOW_CACHE: dict = {}
 
@@ -433,14 +474,19 @@ ATLAS_COLS, ATLAS_ROWS = 8, 9
 ATLAS_CW, ATLAS_CH = 192, 208
 ATLAS_SIZE = (ATLAS_COLS * ATLAS_CW, ATLAS_ROWS * ATLAS_CH)
 
-# 状态 -> 图集行
+# 状态 -> 图集行。契约只有 9 行，陪伴模式的状态只能就近借：
+# 溜达借「向右跑」，犯困/打盹借待机，刚醒借挥手（伸懒腰），被摸借跳跃。
 ATLAS_ROW = {"idle": 0, "tools": 7, "thinking": 8, "waiting": 6,
-             "failed": 5, "celebrating": 4, "offline": 0}
+             "failed": 5, "celebrating": 4, "offline": 0,
+             "roaming": 1, "yawning": 0, "dozing": 0,
+             "sleeping": 0, "waking": 3, "petted": 4}
 # 行的 (中间帧, 末帧) 毫秒，取自契约的逐帧时长
 ATLAS_TIMING = {
-    0: (120, 320), 3: (140, 280), 4: (140, 280),
+    0: (120, 320), 1: (110, 200), 3: (140, 280), 4: (140, 280),
     5: (140, 240), 6: (150, 260), 7: (120, 220), 8: (150, 280),
 }
+# 陪伴模式的状态放慢一点：打盹和睡觉不该跟待机一样精神
+ATLAS_SLOWDOWN = {"yawning": 2.4, "dozing": 3.2, "sleeping": 4.5, "waking": 1.6}
 
 
 class DafeiyuSkin:
@@ -515,7 +561,8 @@ class AtlasSkin:
         if not seq:
             return []
         mid, last = ATLAS_TIMING.get(rows[-1], (140, 280))
-        return [(self._frame(state, r, i), last if k == len(seq) - 1 else mid)
+        slow = ATLAS_SLOWDOWN.get(state, 1.0)
+        return [(self._frame(state, r, i), int((last if k == len(seq) - 1 else mid) * slow))
                 for k, (r, i) in enumerate(seq)]
 
     def reaction_frames(self, kind: str) -> list:
@@ -542,6 +589,13 @@ CLAWD_STATE_MAP = {
     "failed":      ["error"],
     "celebrating": ["notification", "attention"],
     "offline":     ["sleeping", "collapsing", "dozing"],
+    # 陪伴模式：clawd 主题本来就有这些状态，正好对得上
+    "roaming":     ["roam", "idle"],
+    "yawning":     ["yawning", "dozing", "idle"],
+    "dozing":      ["dozing", "sleeping", "idle"],
+    "sleeping":    ["sleeping", "dozing", "collapsing"],
+    "waking":      ["waking", "idle"],
+    "petted":      ["notification", "attention", "idle"],
 }
 # clawd 的用户主题目录（%APPDATA%/clawd-on-desk/themes）
 CLAWD_THEME_DIRS = [
@@ -938,8 +992,9 @@ def render_card(snap: "Snapshot", detail: bool, privacy: bool = False) -> Image.
     row_y = dcy + 12 * s
     if not detail:
         if sub_text:
+            # 气泡（她说的话）用强调色，跟普通状态副行区分开
             d.text((tx, row_y), _ellipsis(d, sub_text, f_sub, x1 - tx - 12 * s),
-                   font=f_sub, fill=TEXT_DIM)
+                   font=f_sub, fill=pal["dot"] if snap.bubble else TEXT_DIM)
         return img.resize((WIN_W, ch), Image.LANCZOS)
 
     # ── 详情展开 ──
@@ -1053,6 +1108,7 @@ class Snapshot:
     idle_hint: str = ""
     detail_line: str = ""
     forced: bool = False
+    bubble: bool = False                              # detail_line 是她说的话，用强调色画
 
     @property
     def elapsed_ms(self) -> Optional[float]:
@@ -1447,6 +1503,309 @@ class StatusWatcher:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 陪伴模式：DSH 那边一个活跃会话都没有时，她自己过日子
+# ─────────────────────────────────────────────────────────────────────────────
+# 输出和 StatusWatcher 一样的 Snapshot，所以 PetApp 不需要知道状态是谁给的。
+#
+# 行为规则：
+#   · 深夜（23:00–07:00）或精力耗尽 → 直接睡
+#   · 一段时间没碰键盘鼠标 → 犯困 → 打盹 → 睡着
+#   · 一有输入 → 醒来 → 回到空闲
+#   · 白天精力足的时候会自己溜达、发呆
+#   · 被戳/被拖/被喂 → 精神一点，亲密度涨
+
+MOOD_PATH = os.path.join(data_dir(), "pet_mood.json")
+
+# 闲置多久进入下一档（秒）
+IDLE_YAWN = 45.0
+IDLE_DOZE = 90.0
+IDLE_SLEEP = 240.0
+# 深夜只要安静这么久就睡
+NIGHT_IDLE_SLEEP = 30.0
+NIGHT_HOURS = (23, 7)            # [23:00, 07:00)
+
+
+def idle_seconds() -> float:
+    """距上次键盘/鼠标输入过了多久（秒）。取不到就返回 0。"""
+    class _LastInput(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+    info = _LastInput()
+    info.cbSize = ctypes.sizeof(info)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    # GetTickCount 是 32 位、约 49.7 天回绕，用掩码算差值即可
+    delta = (ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
+    return delta / 1000.0
+
+
+@dataclass
+class Mood:
+    """持久化的心情与相处记录，存在 pet_mood.json。"""
+
+    affection: float = 0.5          # 亲密度 0~1
+    energy: float = 1.0             # 精力 0~1
+    pokes: int = 0                  # 被戳次数
+    drags: int = 0                  # 被拖次数
+    feeds: int = 0                  # 被喂次数
+    first_seen: float = 0.0         # 第一次见面
+    last_seen: float = 0.0          # 上次运行
+    last_tick: float = 0.0          # 上次结算时间（算精力增减用）
+
+    @property
+    def days_together(self) -> int:
+        if not self.first_seen:
+            return 1
+        return max(1, int((time.time() - self.first_seen) / 86400) + 1)
+
+    @property
+    def mood_label(self) -> str:
+        """按亲密度给个说法，给气泡和详情卡用。"""
+        a = self.affection
+        if a >= 0.85:
+            return "特别黏你"
+        if a >= 0.65:
+            return "挺开心"
+        if a >= 0.4:
+            return "还不错"
+        if a >= 0.2:
+            return "有点蔫"
+        return "好久没理我了"
+
+
+class CompanionSource:
+    """自主陪伴行为。接口和 StatusWatcher 一样，只有 poll()。"""
+
+    def __init__(self, path: str = MOOD_PATH):
+        self.path = path
+        self.mood = self._load()
+        self.state = "idle"
+        self.state_until = 0.0          # 当前状态至少保持到什么时候
+        self.next_roam = time.time() + random.uniform(25, 70)
+        self.bubble = ""                # 当前要显示的气泡文案
+        self.bubble_until = 0.0
+        self._entered = time.time()
+
+    # -- 持久化 -------------------------------------------------------------
+    def _load(self) -> Mood:
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except Exception:                                # noqa: BLE001
+            raw = {}
+        fields = {f.name for f in dataclasses.fields(Mood)}
+        mood = Mood(**{k: v for k, v in raw.items() if k in fields})
+        now = time.time()
+        if not mood.first_seen:
+            mood.first_seen = now
+        mood.last_seen = now
+        mood.last_tick = now
+        return mood
+
+    def save(self) -> None:
+        try:
+            self.mood.last_seen = time.time()
+            with open(self.path, "w", encoding="utf-8") as fh:
+                json.dump(dataclasses.asdict(self.mood), fh, ensure_ascii=False, indent=2)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    # -- 互动 ---------------------------------------------------------------
+    def touch(self, kind: str) -> None:
+        """用户互动时调用：poke / drag / feed。会把她弄精神，亲密度上涨。"""
+        if kind == "poke":
+            self.mood.pokes += 1
+            self.mood.affection = min(1.0, self.mood.affection + 0.02)
+            self.mood.energy = min(1.0, self.mood.energy + 0.05)
+        elif kind == "drag":
+            self.mood.drags += 1
+            self.mood.affection = min(1.0, self.mood.affection + 0.01)
+        elif kind == "feed":
+            self.mood.feeds += 1
+            self.mood.affection = min(1.0, self.mood.affection + 0.06)
+            self.mood.energy = min(1.0, self.mood.energy + 0.25)
+        # 被碰了就醒
+        if self.state in ("dozing", "sleeping"):
+            self._enter("waking", 2.6)
+        self.save()
+
+    def wake(self) -> None:
+        """DSH 那边开工了 —— 她也该醒了（不碰统计，只是醒过来）。"""
+        if self.state in ("dozing", "sleeping", "yawning"):
+            self._enter("waking", 2.6)
+
+    def say(self, text: str, secs: float = 4.0) -> None:
+        self.bubble = text
+        self.bubble_until = time.time() + secs
+
+    # -- 状态机 -------------------------------------------------------------
+    def _enter(self, state: str, hold: float = 0.0) -> None:
+        self.state = state
+        self.state_until = time.time() + hold
+        self._entered = time.time()
+
+    def _night(self) -> bool:
+        hour = time.localtime().tm_hour
+        lo, hi = NIGHT_HOURS
+        return hour >= lo or hour < hi
+
+    def _settle_energy(self, now: float, dt: float) -> None:
+        """醒着掉精力，睡着回精力。"""
+        if self.state == "sleeping":
+            self.mood.energy = min(1.0, self.mood.energy + dt * 0.0025)
+        elif self.state in ("dozing", "idle", "roaming", "yawning"):
+            self.mood.energy = max(0.0, self.mood.energy - dt * 0.00035)
+        self.mood.last_tick = now
+
+    def poll(self) -> Snapshot:
+        now = time.time()
+        dt = max(0.0, min(now - (self.mood.last_tick or now), 5.0))
+        self._settle_energy(now, dt)
+
+        idle = idle_seconds()
+        night = self._night()
+        tired = self.mood.energy < 0.25
+        held = now < self.state_until
+
+        # ── 状态转换 ──
+        if not held:
+            if self.state in ("sleeping", "dozing"):
+                # 有人动键盘鼠标，或者白天睡饱了，就醒
+                if idle < 3.0 or (not night and self.mood.energy > 0.85):
+                    self._enter("waking", 2.6)
+                    if idle < 3.0 and random.random() < 0.35:
+                        self.say(random.choice(WAKE_LINES))
+            elif self.state == "waking":
+                self._enter("idle")
+            elif self.state == "yawning":
+                self._enter("dozing", 0.0)
+            elif self.state == "roaming":
+                self._enter("idle")
+            elif self.state == "petted":
+                self._enter("idle")
+            elif self.state == "idle":
+                sleep_after = NIGHT_IDLE_SLEEP if (night or tired) else IDLE_SLEEP
+                if idle > sleep_after or (tired and idle > 20):
+                    self._enter("sleeping")
+                    if random.random() < 0.3:
+                        self.say(random.choice(SLEEP_LINES))
+                elif idle > IDLE_DOZE:
+                    self._enter("dozing")
+                elif idle > IDLE_YAWN:
+                    self._enter("yawning", 2.8)
+                    if random.random() < 0.4:
+                        self.say(random.choice(YAWN_LINES))
+                elif not night and self.mood.energy > 0.35 and now > self.next_roam:
+                    self._enter("roaming", random.uniform(4.0, 8.0))
+                    self.next_roam = now + random.uniform(35, 90)
+                    if random.random() < 0.25:
+                        self.say(random.choice(ROAM_LINES))
+
+        # ── 组装 Snapshot ──
+        m = self.mood
+        snap = Snapshot(state=self.state)
+        snap.idle_hint = PALETTE[self.state]["label"]
+        snap.title = f"陪你第 {m.days_together} 天"
+        snap.detail_line = m.mood_label
+        snap.tokens_out = float(m.pokes + m.drags + m.feeds)
+        snap.phase = random.random()
+        snap.forced = True
+        # 气泡：她说的话占用副行文案，但用强调色画出来，并进 _card_cache 的键
+        if now < self.bubble_until and self.bubble:
+            snap.detail_line = self.bubble
+            snap.bubble = True
+        return snap
+
+
+# 陪伴模式的文案表。想改直接改这里。
+WAKE_LINES = ["唔…醒了醒了", "你回来啦", "别晃我…", "再睡五分钟…"]
+SLEEP_LINES = ["我先眯一会儿", "撑不住了…", "晚安", "困死了"]
+YAWN_LINES = ["啊——欠", "好无聊啊", "你在忙什么", "有点困了"]
+ROAM_LINES = ["溜达一圈", "活动活动", "看看窗外", "嗯…走两步"]
+PET_LINES = ["嘿嘿", "好舒服", "再摸摸", "最喜欢你了"]
+FEED_LINES = ["好吃！", "谢谢投喂", "还有吗", "满足了"]
+
+
+def virtual_screen() -> tuple:
+    """所有显示器合起来的虚拟桌面范围 (x, y, w, h)。
+
+    多显示器下主屏左上角不一定是 (0,0) —— 副屏在主屏左边时 x 会是负数，
+    所以不能拿单屏尺寸做边界判断。
+    """
+    u = ctypes.windll.user32
+    return (u.GetSystemMetrics(76), u.GetSystemMetrics(77),      # SM_X/YVIRTUALSCREEN
+            u.GetSystemMetrics(78), u.GetSystemMetrics(79))      # SM_CX/CYVIRTUALSCREEN
+
+
+def clamp_position(x: int, y: int) -> tuple:
+    """把窗口位置夹回可见范围。
+
+    拔掉副屏之后，上次记的坐标可能落在已经不存在的区域里，
+    那样窗口会「跑到屏幕外」，看着像程序没启动。
+    """
+    vx, vy, vw, vh = virtual_screen()
+    if vw <= 0 or vh <= 0:
+        return x, y
+    # 至少留 60px 在可见区内，够抓住拖回来
+    margin = 60
+    x = max(vx - WIN_W + margin, min(x, vx + vw - margin))
+    y = max(vy, min(y, vy + vh - margin))
+    return int(x), int(y)
+
+
+def default_position() -> tuple:
+    """默认位置：主屏右下角往上一点。"""
+    u = ctypes.windll.user32
+    sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)        # SM_CX/YSCREEN
+    return sw - WIN_W - 40, sh - WIN_H - 90
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 开机自启（写 HKCU 的 Run 项，不需要管理员）
+# ─────────────────────────────────────────────────────────────────────────────
+
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "DSH-Pet"
+
+
+def autostart_command() -> str:
+    """开机自启要跑的命令行。打包成 exe 之后就是 exe 自己。"""
+    if getattr(sys, "frozen", False):                    # PyInstaller 打的包
+        return f'"{sys.executable}"'
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    exe = pyw if os.path.exists(pyw) else sys.executable
+    return f'"{exe}" "{os.path.abspath(__file__)}"'
+
+
+def autostart_enabled() -> bool:
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            winreg.QueryValueEx(key, AUTOSTART_NAME)
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def set_autostart(on: bool) -> bool:
+    """开/关开机自启。返回是否成功。"""
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            if on:
+                winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as exc:                             # noqa: BLE001
+        print(f"[warn] 设置开机自启失败：{exc}", file=sys.stderr)
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 桌宠窗口
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1467,14 +1826,20 @@ class PetApp:
         self.root.attributes("-topmost", bool(self.cfg.get("always_on_top", True)))
         self.root.resizable(False, False)
 
-        x = int(self.cfg.get("x", self.root.winfo_screenwidth() - WIN_W - 40))
-        y = int(self.cfg.get("y", self.root.winfo_screenheight() - WIN_H - 90))
+        dx, dy = default_position()
+        x = int(self.cfg.get("x", dx))
+        y = int(self.cfg.get("y", dy))
+        x, y = clamp_position(x, y)                      # 拔掉副屏后可能已经在屏幕外
         self.root.geometry(f"{WIN_W}x{WIN_H}+{x}+{y}")
 
         self.display, self.backend = make_display(self.root, WIN_W, WIN_H)
 
         self.watcher = None if (args.demo or args.force_state) else \
             StatusWatcher(pinned=args.session)
+        # 陪伴模式：DSH 没活干时接管。--demo/--force-state 下不用，那是纯预览。
+        self.companion = None if (args.demo or args.force_state or args.no_companion) \
+            else CompanionSource()
+        self.in_companion = False
 
         self.detail = bool(self.cfg.get("show_detail", False))
         self.privacy = bool(self.cfg.get("privacy", False))
@@ -1518,17 +1883,31 @@ class PetApp:
             pass
 
     # -- 精灵缓存 -----------------------------------------------------------
+    def _ensure_state(self, st: str) -> None:
+        """按需渲染某个状态的帧。
+
+        不能启动时全建：whale-chan 七个状态就要 6.4 秒，现在状态涨到 13 个，
+        全建得十几秒，那段时间窗口是死的。改成用到哪个建哪个，
+        启动只等 idle。
+        """
+        if st in self.sprites:
+            return
+        try:
+            items = self.skin.frames(st)
+        except Exception as exc:                         # noqa: BLE001
+            print(f"[warn] 状态 {st} 渲染失败：{exc}", file=sys.stderr)
+            items = []
+        self.sprites[st] = [im for im, _ in items]
+        self.durations[st] = [d for _, d in items]
+        self._loop_ms[st] = sum(self.durations[st])
+
     def _build_sprites(self) -> None:
-        """把每个状态的帧与时长预渲染好；动画只做合成与推送。"""
+        """预渲染 idle，其余状态等用到再建（见 _ensure_state）。"""
         self.sprites: dict = {}
         self.durations: dict = {}
-        total = 0.0
-        for st in STATE_ORDER:
-            items = self.skin.frames(st)
-            self.sprites[st] = [im for im, _ in items]
-            self.durations[st] = [d for _, d in items]
-            total += sum(self.durations[st])
-        self._loop_ms = {st: sum(self.durations[st]) for st in STATE_ORDER}
+        self._loop_ms: dict = {}
+        t0 = time.time()
+        self._ensure_state("idle")
         # 交互反应素材（clawd 主题自带；内置皮肤程序化生成）
         self.reaction_sprites: dict = {}
         self.reaction_durs: dict = {}
@@ -1541,9 +1920,9 @@ class PetApp:
             self.reaction_sprites[kind] = [im for im, _ in items]
             self.reaction_durs[kind] = [d for _, d in items]
         have = [k for k in REACTION_KINDS if self.reaction_sprites[k]]
-        print(f"[skin] {self.skin.display}: "
-              f"{sum(len(v) for v in self.sprites.values())} 帧，共 {total:.0f}ms"
-              f"；交互反应 {', '.join(have) if have else '无'}")
+        print(f"[skin] {self.skin.display}: 启动预渲染 "
+              f"{len(self.sprites['idle'])} 帧，{time.time() - t0:.1f}s"
+              f"；其余状态按需加载；交互反应 {', '.join(have) if have else '无'}")
 
     # -- 事件 ---------------------------------------------------------------
     def _bind_events(self) -> None:
@@ -1554,6 +1933,7 @@ class PetApp:
         r.bind("<Button-3>", self._on_menu)
 
         self.menu = self.tk.Menu(r, tearoff=0)
+        self.menu.add_command(label="喂一口 🍡", command=self._feed)
         self.menu.add_command(label="展开/收起详情", command=self._toggle_detail)
         self.menu.add_separator()
         self.menu.add_command(label="自动跟随活跃会话", command=self._follow_auto)
@@ -1561,15 +1941,20 @@ class PetApp:
         self.menu.add_separator()
         self.var_privacy = self.tk.BooleanVar(value=self.privacy)
         self.var_sound = self.tk.BooleanVar(value=self.sound)
+        self.var_companion = self.tk.BooleanVar(
+            value=self.companion is not None and bool(self.cfg.get("companion", True)))
         self.menu.add_checkbutton(label="隐私模式（隐藏标题与提示词）",
                                   variable=self.var_privacy, command=self._toggle_privacy)
         self.menu.add_checkbutton(label="任务完成时提示音",
                                   variable=self.var_sound, command=self._toggle_sound)
+        self.menu.add_checkbutton(label="陪伴模式（没任务时自己过日子）",
+                                  variable=self.var_companion, command=self._toggle_companion)
         self.menu.add_separator()
         self._skin_menu = self.tk.Menu(self.menu, tearoff=0)
         self.menu.add_cascade(label="皮肤", menu=self._skin_menu)
         self._rebuild_skin_menu()
         self.menu.add_separator()
+        self.menu.add_command(label="设置…", command=self._open_settings)
         self.menu.add_command(label="退出", command=self._quit)
 
     def _rebuild_skin_menu(self) -> None:
@@ -1597,6 +1982,134 @@ class PetApp:
     def _toggle_sound(self) -> None:
         self.sound = bool(self.var_sound.get())
         self._save_config()
+
+    def _toggle_companion(self) -> None:
+        on = bool(self.var_companion.get())
+        self.cfg["companion"] = on
+        if on and self.companion is None:
+            self.companion = CompanionSource()
+        elif not on:
+            if self.companion is not None:
+                self.companion.save()
+            self.companion = None
+            self.in_companion = False
+        self._save_config()
+
+    # -- 设置窗口 -----------------------------------------------------------
+    def _open_settings(self) -> None:
+        tk = self.tk
+        if getattr(self, "_settings_win", None) is not None:
+            try:
+                self._settings_win.deiconify()
+                self._settings_win.lift()
+                return
+            except Exception:                            # noqa: BLE001
+                self._settings_win = None
+
+        win = tk.Toplevel(self.root)
+        self._settings_win = win
+        win.title("DSH 桌宠 · 设置")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        pad = dict(padx=14, pady=6, anchor="w")
+
+        row = 0
+        tk.Label(win, text="行为", font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 2))
+        row += 1
+
+        v_comp = tk.BooleanVar(value=self.companion is not None)
+        v_priv = tk.BooleanVar(value=self.privacy)
+        v_sound = tk.BooleanVar(value=self.sound)
+        v_auto = tk.BooleanVar(value=autostart_enabled())
+
+        def apply_companion():
+            self.var_companion.set(v_comp.get())
+            self._toggle_companion()
+
+        def apply_priv():
+            self.var_privacy.set(v_priv.get())
+            self._toggle_privacy()
+
+        def apply_sound():
+            self.var_sound.set(v_sound.get())
+            self._toggle_sound()
+
+        def apply_auto():
+            ok = set_autostart(v_auto.get())
+            if not ok:
+                v_auto.set(autostart_enabled())
+                status.config(text="设置开机自启失败（见控制台）", fg="#B93B37")
+
+        tk.Checkbutton(win, text="陪伴模式（DSH 没任务时自己过日子）", variable=v_comp,
+                       command=apply_companion).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
+        tk.Checkbutton(win, text="开机自启", variable=v_auto,
+                       command=apply_auto).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
+        tk.Checkbutton(win, text="隐私模式（隐藏标题与提示词）", variable=v_priv,
+                       command=apply_priv).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
+        tk.Checkbutton(win, text="任务完成时提示音", variable=v_sound,
+                       command=apply_sound).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
+
+        tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
+                                                sticky="ew", padx=14, pady=8)
+        row += 1
+        tk.Label(win, text="皮肤", font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
+        row += 1
+
+        v_skin = tk.StringVar(value=self.skin.name)
+        labels = {s["id"]: s["display"] for s in discover_skins()}
+        om = tk.OptionMenu(win, v_skin, *labels.keys(),
+                           command=lambda sid: self._switch_skin(sid))
+        om.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=4)
+        row += 1
+
+        tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
+                                                sticky="ew", padx=14, pady=8)
+        row += 1
+        tk.Label(win, text="相处记录", font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
+        row += 1
+
+        m = self.companion.mood if self.companion else Mood()
+        info = (f"陪你第 {m.days_together} 天 · {m.mood_label}\n"
+                f"被戳 {m.pokes} 次 · 被拖 {m.drags} 次 · 被喂 {m.feeds} 次\n"
+                f"亲密度 {m.affection * 100:.0f}% · 精力 {m.energy * 100:.0f}%")
+        tk.Label(win, text=info, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 6))
+        row += 1
+
+        def reset_pos():
+            dx, dy = default_position()
+            self.root.geometry(f"{WIN_W}x{WIN_H}+{dx}+{dy}")
+            self._save_config()
+            status.config(text="位置已复位", fg="#2E9E63")
+
+        def forget_me():
+            if self.companion is not None:
+                self.companion.mood = Mood()
+                self.companion.mood.first_seen = time.time()
+                self.companion.save()
+            win.destroy()
+            self._settings_win = None
+            self._open_settings()
+
+        btns = tk.Frame(win)
+        btns.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 6))
+        tk.Button(btns, text="位置复位", command=reset_pos).pack(side="left")
+        tk.Button(btns, text="重置相处记录", command=forget_me).pack(side="left", padx=6)
+        row += 1
+
+        status = tk.Label(win, text="", fg="#666")
+        status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        row += 1
+        tk.Button(win, text="关闭", width=10, command=lambda: (
+            win.destroy(), setattr(self, "_settings_win", None))).grid(
+            row=row, column=0, columnspan=2, pady=(6, 14))
 
     # -- 托盘图标 -----------------------------------------------------------
     def _start_tray(self) -> None:
@@ -1694,6 +2207,8 @@ class PetApp:
         sx, sy, wx, wy = self._drag
         dx, dy = e.x_root - sx, e.y_root - sy
         if abs(dx) > 3 or abs(dy) > 3:
+            if not self._moved and self.companion is not None:
+                self.companion.touch("drag")             # 拖动也记一笔
             self._moved = True
         self.root.geometry(f"+{wx + dx}+{wy + dy}")
 
@@ -1704,8 +2219,23 @@ class PetApp:
             durs = self.reaction_durs.get("poke") or []
             if durs:
                 self.poke_until = time.time() + sum(durs) / 1000.0
+            # 陪伴模式记一笔：亲密度和精力都会涨，睡着的话会醒
+            if self.companion is not None:
+                self.companion.touch("poke")
+                if self.in_companion and random.random() < 0.3:
+                    self.companion.say(random.choice(PET_LINES))
             self._toggle_detail()
         self._save_config()
+
+    def _feed(self):
+        """喂一口：精力大涨，亲密度涨得最多。"""
+        if self.companion is None:
+            return
+        self.companion.touch("feed")
+        self.companion.say(random.choice(FEED_LINES), 3.5)
+        durs = self.reaction_durs.get("poke") or []
+        if durs:
+            self.poke_until = time.time() + sum(durs) / 1000.0
 
     def _toggle_detail(self):
         self.detail = not self.detail
@@ -1734,6 +2264,8 @@ class PetApp:
 
     def _quit(self):
         self._save_config()
+        if self.companion is not None:
+            self.companion.save()                        # 记下这一程
         try:
             self.root.destroy()
         except Exception:                                # noqa: BLE001
@@ -1753,10 +2285,20 @@ class PetApp:
             elif self.args.force_state:
                 self.snap = self._demo_snapshot(self.args.force_state)
             elif self.watcher:
-                self.snap = self.watcher.poll()
+                snap = self.watcher.poll()
                 if self.watcher._new_completion:          # 有任务刚跑完
                     self.watcher._new_completion = False
                     self._play_sound()
+                # DSH 那边没活干（空闲或压根没会话）→ 交给陪伴模式，她自己过日子。
+                # 有活在跑时反过来把她叫醒，免得 DSH 都开工了她还在睡。
+                if snap.state in ("idle", "offline") and self.companion is not None:
+                    snap = self.companion.poll()
+                    self.in_companion = True
+                else:
+                    self.in_companion = False
+                    if self.companion is not None:
+                        self.companion.wake()
+                self.snap = snap
         except Exception as exc:                         # noqa: BLE001
             print(f"[warn] poll: {exc}", file=sys.stderr)
         self.root.after(POLL_MS, self._poll)
@@ -1786,6 +2328,7 @@ class PetApp:
     def _tick(self):
         try:
             st = self.snap.state
+            self._ensure_state(st)                       # 用到才渲染（见 _ensure_state）
             frames = self.sprites.get(st) or self.sprites.get("idle") or []
             durs = self.durations.get(st) or [TICK_MS]
             if not frames:
@@ -1931,6 +2474,8 @@ def main() -> int:
     ap.add_argument("--skin", default=None, help="指定皮肤 id（默认用配置里的）")
     ap.add_argument("--list-skins", action="store_true", help="列出可用皮肤后退出")
     ap.add_argument("--privacy", action="store_true", help="隐私模式渲染")
+    ap.add_argument("--no-companion", action="store_true",
+                    help="关掉陪伴模式（DSH 没任务时就显示空闲，不自己过日子）")
     args = ap.parse_args()
 
     if args.list_skins:
