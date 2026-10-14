@@ -106,6 +106,41 @@ export function apply(ctx, config) {
     },
   }))
 
+  // 诊断：把客户端模块图（__DSH_BOOT__ 的来源）读出来，确认本包有没有进图。
+  // 客户端按钮不显示时，第一个要排除的就是「包没被扫进启动图」。
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/dsh-pet/debug-boot',
+    handler: (_req, res) => {
+      const wp = ctx.get('webPlugins')
+      const info = { hasService: wp !== undefined, hasGraph: false, keys: [], ids: [], petIds: [] }
+      if (wp && typeof wp.graph === 'function') {
+        try {
+          const g = wp.graph()
+          info.hasGraph = true
+          info.keys = Object.keys(g || {})
+          const ids = []
+          const walk = (v, depth) => {
+            if (depth > 5 || v === null || typeof v !== 'object') return
+            if (Array.isArray(v)) {
+              for (const x of v) walk(x, depth + 1)
+              return
+            }
+            if (typeof v.id === 'string') ids.push(v.id)
+            if (typeof v.name === 'string' && typeof v.kind === 'string') ids.push(v.name)
+            for (const k of Object.keys(v)) walk(v[k], depth + 1)
+          }
+          walk(g, 0)
+          info.ids = [...new Set(ids)]
+          info.petIds = info.ids.filter((x) => /pet/i.test(x))
+        } catch (err) {
+          info.error = String((err && err.message) || err)
+        }
+      }
+      sendJson(res, info)
+    },
+  }))
+
   // 插件被停用或更新时，把桌宠一并关掉 —— 不让它变成孤儿进程
   ctx.effect(() => () => {
     stop()
