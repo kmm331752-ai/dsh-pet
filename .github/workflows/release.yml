@@ -23,6 +23,11 @@ jobs:
   build:
     name: 构建并发布
     runs-on: windows-latest
+    # Windows runner 的控制台默认是 cp1252，而 build_exe.py 和测试都会
+    # 打印中文 —— 不加这个会 UnicodeEncodeError 崩在第一步。
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
       - uses: actions/checkout@v4
         with:
