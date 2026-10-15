@@ -293,6 +293,32 @@ export function apply(ctx, config) {
     },
   }))
 
+  // 客户端半的启动上报。浏览器里出问题（组件抛错、服务缺失）不会让应用崩溃，
+  // 插槽条目只是静默消失 —— 光看界面和宿主日志都发现不了。
+  // 所以 client.js 把每个阶段 POST 到这里，GET 回读。
+  const clientLog = []
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/dsh-pet/client-log',
+    handler: (req, res) => {
+      if (req.method === 'POST') {
+        const chunks = []
+        req.on('data', (c) => chunks.push(c))
+        req.on('end', () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+            clientLog.push({ t: new Date().toISOString().slice(11, 19), ...body })
+            if (clientLog.length > 60) clientLog.shift()
+          } catch { /* 报文坏了就丢 */ }
+          sendJson(res, { ok: true, count: clientLog.length })
+        })
+        return
+      }
+      sendJson(res, { count: clientLog.length, entries: clientLog })
+    },
+  }))
+
   // 插件被停用或更新时，把桌宠一并关掉 —— 不让它变成孤儿进程
   ctx.effect(() => () => {
     stop()
@@ -302,5 +328,6 @@ export function apply(ctx, config) {
   // 桌宠自带单实例锁，所以重复启动不会叠出第二只。
   if (cfg.autostart !== false) start()
 
-  console.log('[dsh-pet] 路由已注册: /dsh-pet/status, /dsh-pet/toggle')
+  console.log('[dsh-pet] 路由已注册: /dsh-pet/status, /dsh-pet/toggle, '
+    + '/dsh-pet/debug-boot, /dsh-pet/client-log')
 }
