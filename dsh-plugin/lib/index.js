@@ -120,6 +120,19 @@ export function apply(ctx, config) {
   // 宿主日志里什么都看不到。这条路由就是把这层黑盒打开：
   //   GET /dsh-pet/debug-boot          只诊断
   //   GET /dsh-pet/debug-boot?fix=1    诊断 + 清掉负缓存并重新组合
+  // 页面每次渲染 index 都会走这个钩子。桌面版如果由 Electron 外壳自己组页面
+  // （__DSH_TRANSPORT__ 是 shell 提供的载体），这里可能一次都不触发 ——
+  // 那就说明客户端模块的交付方式和我们想的不一样。
+  let indexInjectHits = 0
+  const indexInjectUrls = []
+  ctx.on('webserver/index-inject', (table) => {
+    indexInjectHits += 1
+    try {
+      const rows = Array.isArray(table) ? table : []
+      for (const row of rows) if (row && typeof row.src === 'string') indexInjectUrls.push(row.src)
+    } catch { /* 只是诊断，别影响渲染 */ }
+  })
+
   const findClientModules = () => {
     // 服务名是 clientModules（dsh-client-modules 里 super(ctx, "clientModules")）。
     // 它可能挂在 root 上而不是本插件的作用域里，所以几条路都试一遍。
@@ -203,21 +216,76 @@ export function apply(ctx, config) {
       }
 
       // ── 4. 组合出来的图（__DSH_BOOT__ 的来源） ──
+      // 结构是 { rev, entries, batches } —— 没有 plugins 字段。
+      // 之前误以为有，取了个空数组，白绕了一圈。
       out.graph = safe(() => {
-        const g = cm.graph()
-        return { keys: Object.keys(g ?? {}), plugins: (g?.plugins ?? []).map((p) => p.id ?? p) }
+        const g = cm.graph() ?? {}
+        const entries = g.entries ?? []
+        const batches = g.batches ?? []
+        return {
+          rev: g.rev ?? null,
+          entryCount: entries.length,
+          entryIds: entries.map((e) => e.id),
+          hasMine: entries.some((e) => /pet/i.test(e.id ?? '')),
+          batches: batches.map((b) => ({ phase: b.phase, url: b.url })),
+        }
       })
+
+      // ── 4b. 内部表：table 是 Map<包名, 记录>，sources 是 Map<sourceKey, 源> ──
+      out.table = safe(() => {
+        const t = cm.table
+        if (t === undefined) return 'no table property'
+        const keys = [...t.keys()]
+        return { size: keys.length, keys, hasMine: keys.some((k) => /pet/i.test(k)) }
+      })
+      out.sources = safe(() => {
+        const s = cm.sources
+        if (s === undefined) return 'no sources property'
+        const all = [...s.values()].map((v) => ({ pkg: v.packageName, loaderName: v.loaderName }))
+        return { size: all.length, mine: all.filter((v) => /pet/i.test(v.pkg)) }
+      })
+      out.clientPath = safe(() => cm.clientPath('dsh-pet-toggle'))
+
+      // ── 4d. 端到端：图里如果有我，就按它的 url 把 bundle 真取一遍 ──
+      // 这一步证明「组合 -> 供给」整条链路通不通，而不只是元数据解析成功。
+      out.bundleProbe = safe(() => {
+        const g = cm.graph() ?? {}
+        const mineEntry = (g.entries ?? []).find((e) => /pet/i.test(e.id ?? ''))
+        if (mineEntry === undefined) return '图里没有我的条目'
+        const res = cm.fetchBundle({ method: 'GET', url: mineEntry.url })
+        return {
+          entryId: mineEntry.id,
+          rev: mineEntry.rev ?? null,
+          url: mineEntry.url,
+          status: res.status,
+          contentType: res.headers?.get?.('content-type') ?? null,
+          bytes: res.body === null ? 0 : undefined,
+        }
+      })
+
+      // ── 4c. 桌面版到底走不走 index-inject？ ──
+      // 如果 Electron 外壳自己组页面（__DSH_TRANSPORT__ 是 shell 提供的），
+      // 这个钩子可能根本不触发 —— 那问题就不在组合，而在交付。
+      out.indexInject = { fired: indexInjectHits, urls: indexInjectUrls.slice(0, 5) }
 
       // ── 5. fix=1：清掉负缓存并强制重新组合 ──
       if (/[?&]fix=1/.test(req.url || '')) {
-        const before = JSON.stringify(out.graph?.value?.plugins ?? [])
         out.fix = safe(() => {
+          const before = (cm.graph()?.entries ?? []).map((e) => e.id)
           const cleared = cm.pkgMeta?.clear !== undefined
           if (cleared) cm.pkgMeta.clear()
           const errs = []
+          cm.dirty?.add?.(out.loaderName)             // 先标脏，flush 才会重走本条目
           cm.flush((err) => errs.push(String((err && err.message) || err)))
-          const after = (cm.graph()?.plugins ?? []).map((p) => p.id ?? p)
-          return { clearedCache: cleared, flushErrors: errs, after, changed: JSON.stringify(after) !== before }
+          const after = (cm.graph()?.entries ?? []).map((e) => e.id)
+          return {
+            clearedCache: cleared,
+            flushErrors: errs,
+            beforeCount: before.length,
+            afterCount: after.length,
+            added: after.filter((x) => !before.includes(x)),
+            hasMine: after.some((e) => /pet/i.test(e)),
+          }
         })
       }
 
