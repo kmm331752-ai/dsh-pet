@@ -2054,18 +2054,19 @@ class CompanionSource:
             self.say(say_line("LONELY_LINES"), 5.0)
             m.affection = max(0.0, m.affection - 0.01)
 
-        # 早晚问候：每个时段只问候一次
+        # 早晚问候：每个时段只问候一次。
+        # 这两个标记存在 Mood 上（要跨次启动记住），不是 CompanionSource 的属性。
         hour = time.localtime().tm_hour
         slot = "morning" if 5 <= hour < 11 else ("night" if hour >= 22 or hour < 2 else "")
-        if slot and self.greeted != slot and self.state == "idle":
-            self.greeted = slot
+        if slot and m.greeted != slot and self.state == "idle":
+            m.greeted = slot
             self.save()
-            self.say(random.choice(MORNING_LINES if slot == "morning" else NIGHT_LINES), 5.0)
+            self.say(say_line("MORNING_LINES" if slot == "morning" else "NIGHT_LINES"), 5.0)
 
         # 陪满整周解锁新台词
         days = m.days_together
-        if days >= 7 and self.unlocked < 7:
-            self.unlocked = 7
+        if days >= 7 and m.unlocked < 7:
+            m.unlocked = 7
             self.save()
             self.say(f"我们认识 {days} 天啦", 5.0)
 

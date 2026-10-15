@@ -141,6 +141,32 @@ class TestCompanionStateMachine(unittest.TestCase):
             self.assertGreaterEqual(t, vx)
             self.assertLessEqual(t, vx + vw - P.WIN_W)
 
+    def test_situational_runs_in_every_hour(self):
+        """把 24 小时全跑一遍。
+
+        这条是 CI 逼出来的：早晚问候只在 5~11 点或 22 点后触发，
+        本地下午跑测试永远走不到那行 —— 而那里真的写着 self.greeted
+        （应该读 self.mood.greeted），在 CI 的 UTC 早晨直接 AttributeError。
+        时间相关的分支必须把时间穷举掉，不能靠"我这儿跑过了"。
+        """
+        for hour in range(24):
+            with self.subTest(hour=hour):
+                fake = time.struct_time((2026, 1, 1, hour, 0, 0, 3, 1, -1))
+                with mock.patch.object(P.time, "localtime", lambda _f=fake: _f):
+                    self._poll(1.0)
+                    self._poll(1.0, night=(hour >= 22 or hour < 2))
+
+    def test_greeting_is_recorded_on_mood_not_source(self):
+        """问候标记必须落在 Mood 上 —— 否则重启就忘了，每天重复问候。"""
+        fake = time.struct_time((2026, 1, 1, 8, 0, 0, 3, 1, -1))
+        self.c.mood.greeted = ""
+        self.c.state = "idle"
+        self.c.state_until = 0
+        with mock.patch.object(P.time, "localtime", lambda: fake):
+            self.c._situational(time.time(), 1.0, False)
+        self.assertEqual(self.c.mood.greeted, "morning")
+        self.assertFalse(hasattr(self.c, "greeted"), "不该在 CompanionSource 上另开一个属性")
+
 
 class TestMood(unittest.TestCase):
     def test_mood_round_trips(self):
