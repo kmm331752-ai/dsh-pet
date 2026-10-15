@@ -52,18 +52,8 @@ export function apply(ctx, config) {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-  /** 启动桌宠；已在运行则原样返回。会先等上一只完全退出。 */
-  const start = async () => {
-    if (handle !== null) return status()
-    if (stopping !== null) {
-      try {
-        await stopping
-      } catch { /* 上一只怎么退的不重要，只要它退干净了 */ }
-      stopping = null
-      // done 落地就代表进程没了，端口理论上已释放；留一点余量更稳
-      await sleep(300)
-    }
-    if (handle !== null) return status()          // 等待期间可能已经被别人拉起
+  /** 起一只，不做等待。返回是否成功 spawn（不代表它活下来了）。 */
+  const spawnOnce = () => {
     try {
       const spawned = ctx.subprocess.spawn({
         argv: [pythonPath, scriptPath],
@@ -77,19 +67,57 @@ export function apply(ctx, config) {
       const forget = () => {
         if (handle !== spawned) return
         handle = null
-        // 起来不到 3 秒就退出，基本就是撞上单实例锁了（桌宠现在会非零退出）
+        // 起来不到 3 秒就退出，基本就是撞上单实例锁了（桌宠会非零退出）
         if (Date.now() - startedAt < 3000 && lastError === null) {
-          lastError = '桌宠启动后立即退出：单实例锁端口仍被上一只占用，稍后再试'
+          lastError = '桌宠启动后立即退出：单实例锁端口仍被上一只占用'
         }
       }
       // 用户从桌宠右键退出时，这里也要跟着复位
       spawned.done.then(forget, forget)
-      lastError = null
-      console.log('[dsh-pet] 已启动:', scriptPath)
+      return true
     } catch (err) {
       lastError = String((err && err.message) || err)
       handle = null
-      console.error('[dsh-pet] 启动失败:', lastError)
+      console.error('[dsh-pet] spawn 失败:', lastError)
+      return false
+    }
+  }
+
+  /**
+   * 启动桌宠；已在运行则原样返回。
+   *
+   * 会做两件事，都是为了绕开「单实例锁端口要 2 秒才释放」这个坑：
+   *   1. 先等上一只真正退出（stop 时记下的 done）
+   *   2. 起来之后确认它还活着；被锁挡掉就等一会儿重试
+   *
+   * 第 2 条是必须的：DSH 重启时，上一个 DSH 启动的桌宠可能还在退出中，
+   * 新进程 bind 失败会立刻退出 —— 那时候没有任何"上一只"可以等。
+   * 实测就是这么翻车的：重启 DSH 后桌宠没了，按钮变红。
+   */
+  const start = async (retries = 3) => {
+    if (handle !== null) return status()
+    if (stopping !== null) {
+      try {
+        await stopping
+      } catch { /* 上一只怎么退的不重要，只要它退干净了 */ }
+      stopping = null
+      // done 落地就代表进程没了，端口理论上已释放；留一点余量更稳
+      await sleep(300)
+    }
+    if (handle !== null) return status()          // 等待期间可能已经被别人拉起
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      lastError = null
+      if (!spawnOnce()) break                     // spawn 本身就抛错了，重试没意义
+      await sleep(1200)
+      if (handle !== null) {                      // 活过 1.2 秒 —— 起来了
+        console.log('[dsh-pet] 已启动:', scriptPath, attempt ? `(第 ${attempt + 1} 次尝试)` : '')
+        return status()
+      }
+      if (attempt < retries) {
+        console.log(`[dsh-pet] 第 ${attempt + 1} 次启动被单实例锁挡掉，等 2 秒重试`)
+        await sleep(2000)
+      }
     }
     return status()
   }

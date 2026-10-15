@@ -2508,6 +2508,7 @@ class PetApp:
         self._pomo_menu.add_command(label="取消计时", command=self._cancel_pomodoro)
         self.menu.add_cascade(label="番茄钟 🍅", menu=self._pomo_menu)
         self.menu.add_separator()
+        self._skin_menu = self.tk.Menu(self.menu, tearoff=0)
         self.menu.add_cascade(label="皮肤", menu=self._skin_menu)
         self._rebuild_skin_menu()
         self.menu.add_separator()
@@ -2983,6 +2984,13 @@ class PetApp:
         if self._drag is None or self._moved:
             return
         self.grabbed = True
+        self._say(say_line("GRAB_LINES"), 2.4)
+
+    def _say(self, text: str, secs: float = 3.0) -> None:
+        """让陪伴模式冒一句话。没开陪伴模式（或专注模式）就什么也不做。"""
+        if not text or self.companion is None or self.focus_mode:
+            return
+        self.companion.say(text, secs)
 
     def _drop(self) -> None:
         """松手：她往下掉，落到屏幕底部。"""
@@ -3042,6 +3050,7 @@ class PetApp:
             self._shake = []
             self.dizzy_until = now + SHAKE_DIZZY_S
             self.poke_until = 0.0
+            self._say(say_line("DIZZY_LINES"), 2.6)
         self.root.geometry(f"+{wx + dx}+{wy + dy}")
 
     def _on_release(self, e):
@@ -3088,6 +3097,7 @@ class PetApp:
             self.grab_edge = edge
             if edge is not None:
                 self.root.geometry(f"+{x}+{y}")
+                self._say(say_line("EDGE_LINES"), 2.4)
         self._save_config()
 
     def _feed(self):

@@ -282,6 +282,66 @@ class TestHotkeys(unittest.TestCase):
         self.assertEqual(len(pos), 2)
 
 
+class TestSourceSanity(unittest.TestCase):
+    """只读源码的检查，不跑代码。
+
+    这里放的是「加功能时手滑删了一行」那类错误 —— 跑起来才发现，
+    而且往往被别的报错盖住。静态检查能提前拦住。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import re
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "dsh_pet.py")
+        with open(path, encoding="utf-8") as fh:
+            cls.src = fh.read()
+        cls.re = re
+
+    def test_every_cascade_menu_is_created(self):
+        """add_cascade 引用的每个 self._x_menu 都要有对应的创建语句。
+
+        这条是踩出来的：加番茄钟菜单时把
+            self._skin_menu = self.tk.Menu(self.menu, tearoff=0)
+        那行删掉了，于是 __init__ 里的 add_cascade 直接 AttributeError ——
+        桌宠每次启动都崩。更糟的是当时同时有端口锁冲突，报错被盖住，
+        我误以为只是锁的问题就放过了。
+        """
+        used = set(self.re.findall(r"add_cascade\([^)]*menu=self\.(\w+_menu)", self.src))
+        made = set(self.re.findall(r"self\.(\w+_menu)\s*=\s*self\.tk\.Menu", self.src))
+        self.assertTrue(used, "一个 cascade 菜单都没找到，检查方式可能失效了")
+        self.assertEqual(used - made, set(),
+                         f"这些菜单被引用但没有创建：{sorted(used - made)}")
+
+    def test_mood_fields_are_not_read_from_source(self):
+        """只定义在 Mood 上的字段，不该被写成 self.<字段>。
+
+        greeted / unlocked 属于 Mood（要跨次启动记住）。曾经写成
+        self.greeted，早上或深夜启动就 AttributeError —— 也是 CI 抓到的。
+        """
+        import dataclasses
+        mood_fields = {f.name for f in dataclasses.fields(P.Mood)}
+        for field in ("greeted", "unlocked"):
+            self.assertIn(field, mood_fields)
+            with self.subTest(field=field):
+                self.assertNotIn(f"self.{field}", self.src,
+                                 f"应该写 self.mood.{field}，不是 self.{field}")
+
+    def test_all_line_tables_are_wired(self):
+        """台词表里的每一组都要真被用到，避免加了表却忘了接线。
+
+        允许条件形式（say_line("A" if x else "B")），所以匹配的是
+        「这个键作为字符串出现在某次 say_line 调用里」而不是死板的
+        say_line("KEY")。第一版写死了，把 MORNING/NIGHT 误报成没接线 ——
+        而它同时也漏掉了 DIZZY/GRAB/EDGE 这三组真的没接的。
+        """
+        for key in P.LINES:
+            with self.subTest(key=key):
+                self.assertRegex(
+                    self.src, rf'say_line\([^)]*"{key}"',
+                    f"{key} 定义了但没有任何地方 say_line 它")
+
+
 class TestConfig(unittest.TestCase):
     def test_paths_are_absolute(self):
         for p in (P.CONFIG_PATH, P.MOOD_PATH, P.ASSETS):
