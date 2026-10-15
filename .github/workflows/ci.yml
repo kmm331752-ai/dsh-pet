@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 测试（Windows / Python ${{ matrix.python }}）
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 是 README 里声明的最低版本，3.12 是当前主力
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 只装跑测试需要的；pystray / numpy 是可选功能，测试里不碰
+          pip install pillow zstandard
+
+      - name: 跑测试
+        run: python tests/test_pet.py
+
+      - name: 语法检查（打包脚本也要能编译）
+        run: |
+          python -m py_compile dsh_pet.py build_exe.py
+          python -m py_compile tests/test_pet.py

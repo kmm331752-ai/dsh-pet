@@ -1,0 +1,61 @@
+name: Release
+
+# 打 tag 就自动构建 exe 并发 Release —— 不用手工跑 build_exe.py 再传。
+# 用法：
+#   git tag v1.2.0 && git push origin v1.2.0
+#
+# build_exe.py 内部先 `git archive` 导出已提交的文件再打包，
+# 所以本地那些被 .gitignore 排除的受限素材不会混进产物 —— CI 上同理。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v1.2.0）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建并发布
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # build_exe.py 要用 git archive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pillow zstandard pyinstaller
+
+      - name: 跑测试（测试不过就不发版）
+        run: python tests/test_pet.py
+
+      - name: 构建 exe
+        run: python build_exe.py
+
+      - name: 校验产物
+        run: |
+          $exe = "dist/DSH-Pet.exe"
+          if (-not (Test-Path $exe)) { throw "没找到 $exe" }
+          $mb = (Get-Item $exe).Length / 1MB
+          Write-Host "产物大小: $([math]::Round($mb,1)) MB"
+          # 夹带了 clawd 素材的话会明显大于这个数（那批有 168MB）
+          if ($mb -gt 120) { throw "exe 异常大（$mb MB），可能夹带了不该分发的素材" }
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/DSH-Pet.exe
+          generate_release_notes: true
+          draft: false
