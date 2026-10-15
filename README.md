@@ -20,6 +20,14 @@
 下载 [Releases](../../releases) 里的 `DSH-Pet.exe`，双击就跑。
 配置和相处记录会写在 exe 旁边。
 
+**或者用安装包**：`DSH-Pet-Setup-x.y.z.exe` —— 带开始菜单项、桌面快捷方式和
+卸载程序，安装时可勾选开机自启。自己编译安装包：
+
+```bash
+python build_exe.py
+iscc installer.iss        # 需要 Inno Setup 6
+```
+
 **方式二：从源码跑**
 
 ```bash
@@ -138,10 +146,51 @@ DSH 那边一个活跃会话都没有的时候，她不会傻站着显示「空�
 |---|---|
 | `Ctrl+Alt+P` | 显示 / 隐藏她 |
 | `Ctrl+Alt+F` | 喂一口 |
+| `Ctrl+Alt+D` | 专注模式开关（安静待机不冒泡） |
+| `Ctrl+Alt+H` | 截图模式：连托盘一起藏掉，录屏时不碍事 |
 | `Ctrl+Alt+S` | 打开设置 |
 
 不想用可以 `--no-hotkeys` 启动。注册失败（比如被别的程序占了）只会在控制台
 警告一句，不影响桌宠本身。
+
+## 🍅 番茄钟
+
+右键 → **番茄钟**，选 25 / 45 / 60 分钟。计时期间信息卡副行显示剩余时间
+（`🍅 12:34`，用强调色），到点她会庆祝 + 响提示音 + 说一句。
+
+**专注模式**（`Ctrl+Alt+D`）会让所有气泡静音，适合开会或录屏。
+
+## 🧩 自定义台词
+
+所有文案都在文件顶部，但不用改代码也能换 —— 在程序目录放一个 `pet_lines.json`：
+
+```json
+{
+  "PET_LINES": ["嘿嘿", "再摸摸"],
+  "FEED_LINES": ["谢谢投喂"],
+  "YAWN_LINES": ["啊——欠", "老板什么时候下班"]
+}
+```
+
+可用的键：`WAKE_LINES` / `SLEEP_LINES` / `YAWN_LINES` / `ROAM_LINES` /
+`PET_LINES` / `FEED_LINES` / `ANNOY_LINES` / `DIZZY_LINES` / `GRAB_LINES` /
+`HUNGRY_LINES` / `LONELY_LINES` / `MORNING_LINES` / `NIGHT_LINES` /
+`EDGE_LINES` / `POMO_DONE_LINES`。
+
+**只覆盖你写的那几个键**，其余继续用默认。值必须是**非空字符串列表**，
+写错了会被忽略（不会让桌宠变成一句话都不说）。
+
+## 📤 导出相处记录
+
+右键 → **导出相处记录…**，在程序目录生成 `相处记录.png`：陪了几天、
+亲密度进度条、被摸/被拖/被喂次数。可以直接发出去。
+
+## 🔔 自动更新
+
+右键 → **检查更新…**，后台查一次 GitHub Releases（不阻塞界面、不自动下载）。
+有新版本她会说一句「有新版本 v1.2.0」，控制台也会打印下载地址。
+
+网络不通或限流都只算「查不到」，绝不会因此报错或影响启动。
 
 ## 🏃 她会自己做什么
 
@@ -326,12 +375,27 @@ Calico 不受影响 —— 它只有 idle 用 SVG，而且是眼球追踪用的 
 |---|---|
 | `dsh_pet.py` | 主程序，状态读取 + 陪伴行为 + 渲染 + 窗口都在这一个文件里 |
 | `build_exe.py` | 打包脚本，产出 `dist/DSH-Pet.exe` |
+| `installer.iss` | Inno Setup 安装包脚本（`iscc installer.iss`） |
+| `tests/test_pet.py` | 回归测试，`python tests/test_pet.py` 直接跑 |
 | `assets/` | 角色三视图，以及 `skins/` 下的契约皮肤包 |
 | `dsh-plugin/` | DSH 插件（可选，见下） |
 | `启动桌宠.vbs` / `调试启动.bat` | 静默启动 / 带控制台启动 |
 | `preview/` | 各状态渲染图和实机截图 |
 | `pet_config.json` | 窗口位置与偏好（运行时生成，已在 .gitignore 里） |
 | `pet_mood.json` | 相处记录：亲密度、精力、互动次数（同上） |
+| `pet_lines.json` | 可选，自定义台词（同上） |
+| `.github/workflows/` | CI：push 跑测试；打 tag 自动构建并发 Release |
+
+## 🧪 测试
+
+```bash
+python tests/test_pet.py          # 33 项，1 秒跑完，不需要 pytest
+```
+
+覆盖状态机、渲染、日志解析、几何、热键表、台词表 —— 都是**不依赖窗口**的部分。
+开窗口、托盘、全局热键得手工看，测试不碰。
+
+CI 会在 Windows + Python 3.10/3.12 上跑这套，push 和 PR 都触发。
 
 ## 🔌 DSH 插件（可选）
 

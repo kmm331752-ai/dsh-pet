@@ -530,6 +530,31 @@ def overlay_for(kind: str, phase: float):
     return _overlay_layer(kind, phase).resize((WIN_W, PET_AREA_H), Image.LANCZOS)
 
 
+def session_dots(tasks: list, max_dots: int = 7):
+    """她脚边的一排小圆点：每个活跃会话一个，颜色对应它的状态。
+
+    多任务时一眼能看出「有几个在跑、分别什么状态」，不用展开详情卡。
+    只有一个任务时不画 —— 那时候角色本身的状态就是答案。
+    """
+    if len(tasks) < 2:
+        return None
+    layer = Image.new("RGBA", (WIN_W, PET_AREA_H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    shown = tasks[:max_dots]
+    r = 3
+    gap = 11
+    total = len(shown) * gap - (gap - r * 2)
+    x = (WIN_W - total) // 2
+    y = PET_AREA_H - 5
+    for t in shown:
+        col = _rgba(PALETTE.get(t.state, PALETTE["idle"])["dot"])[:3]
+        d.ellipse([x - r, y - r, x + r, y + r], fill=col + (235,))
+        x += gap
+    if len(tasks) > max_dots:
+        d.text((x - 2, y - 6), f"+{len(tasks) - max_dots}", fill=(200, 206, 216, 230))
+    return layer
+
+
 def render_pet(state: str, phase: float) -> Image.Image:
     """渲染一帧角色：素材 + 呼吸/弹跳/摇摆 + 状态配件。
 
@@ -1196,6 +1221,19 @@ def render_card(snap: "Snapshot", detail: bool, privacy: bool = False) -> Image.
     bar_col = (240, 120, 110, 255) if snap.context_pct > 80 else pal["dot"]
     d.rounded_rectangle([tx, bar_y, tx + fill_w, bar_y + 4 * s], radius=2 * s, fill=bar_col)
 
+    # 最慢的几个工具（来自事件日志的 tool/call → tool/result 计时）
+    if snap.slow_tools:
+        row_y = bar_y + 10 * s
+        d.text((tx, row_y), "最慢", font=f_small, fill=TEXT_DIM)
+        row_y += 13 * s
+        for name, ms in snap.slow_tools[:3]:
+            d.text((tx + 8 * s, row_y), _ellipsis(d, name, f_small, 60 * s),
+                   font=f_small, fill=TEXT_MAIN)
+            val = f"{ms / 1000:.1f}s" if ms >= 1000 else f"{ms:.0f}ms"
+            vw = d.textlength(val, font=f_small)
+            d.text((x1 - 12 * s - vw, row_y), val, font=f_small, fill=pal["dot"])
+            row_y += 13 * s
+
     return img.resize((WIN_W, ch), Image.LANCZOS)
 
 
@@ -1225,6 +1263,7 @@ class TaskInfo:
     queued: bool = False                              # 有排队中的消息
     plan_active: bool = False                         # 处于计划模式
     turn_open: bool = False                           # 回合尚未结束
+    slow_tools: list = field(default_factory=list)    # 本次会话最慢的几个工具 [(名字, 毫秒)]
 
     @property
     def elapsed_ms(self) -> Optional[float]:
@@ -1269,6 +1308,8 @@ class Snapshot:
     bubble: bool = False                              # detail_line 是她说的话，用强调色画
     mirror: bool = False                              # 水平翻转（看向左边时用）
     wander: float = 0.0                               # 窗口水平目标位置（绝对坐标，0 = 不动）
+    slow_tools: list = field(default_factory=list)    # 主任务最慢的工具 [(名字, 毫秒)]
+    focus_x: float = 0.0                              # 非 0 时把窗口移到这个 x（等待提醒用）
 
     @property
     def elapsed_ms(self) -> Optional[float]:
@@ -1316,6 +1357,12 @@ class LogTail:
         self.partial = ""
         self.calls: dict = {}
         self.last_tool = ""
+        # 工具耗时统计：按【事件 seq】记发起时刻与工具名，结果事件通过
+        # sourceEventSeqs 指回来。不能用 callId 配对 —— 它里面的 call_00_
+        # 是每回合重置的序号，跨回合重复，会算出几十天的耗时。
+        self.call_at: dict = {}
+        self.call_name: dict = {}
+        self.tool_times: dict = {}
         self._dctx = None
         if path:
             self._seed()
@@ -1380,9 +1427,35 @@ class LogTail:
                 if cid and name:
                     self.calls[cid] = name
                     self.last_tool = name
+                    # 计时按 seq 记，不按 callId —— callId 里的 call_00_ 是
+                    # 每回合重置的序号，跨回合会重复，用它配对会算出几十天的耗时。
+                    self.call_at[ev.get("seq")] = ev.get("time")
+                    self.call_name[ev.get("seq")] = name
                     if len(self.calls) > 800:
                         for k in list(self.calls)[:400]:
                             self.calls.pop(k, None)
+                    if len(self.call_at) > 800:
+                        for k in list(self.call_at)[:400]:
+                            self.call_at.pop(k, None)
+                            self.call_name.pop(k, None)
+            elif et == "tool/result":
+                end = ev.get("time")
+                for sq in (ev.get("sourceEventSeqs") or []):
+                    started = self.call_at.pop(sq, None)
+                    name = self.call_name.pop(sq, None)
+                    if name and started and end:
+                        dur = max(0.0, end - started)
+                        bucket = self.tool_times.setdefault(name, [])
+                        bucket.append(dur)
+                        if len(bucket) > 40:                 # 只留最近 40 次
+                            del bucket[:20]
+                    break
+
+    def slowest(self, n: int = 3) -> list:
+        """本次会话最慢的 n 个工具（按各自最慢一次排）。"""
+        ranked = [(name, max(durs)) for name, durs in self.tool_times.items() if durs]
+        ranked.sort(key=lambda x: -x[1])
+        return ranked[:n]
 
     def poll(self) -> None:
         if not self.path:
@@ -1526,6 +1599,7 @@ class StatusWatcher:
         self._turn_open: dict = {}                    # session_id -> 上次看到的回合开闭
         self._celebrate_until: dict = {}              # session_id -> 庆祝截止时间
         self._new_completion = False                  # 本轮刚有任务完成（供提示音）
+        self._completed: list = []                    # 最近完成的会话 [{title, tools}]
 
     # -- 会话扫描 -----------------------------------------------------------
     def _scan(self) -> list:
@@ -1562,15 +1636,18 @@ class StatusWatcher:
 
     def _make_task(self, info: dict, with_tools: bool) -> TaskInfo:
         names = []
-        if with_tools and info["pending_ids"]:
+        slow = []
+        if with_tools:
             tail = self._tail(info["session_id"])
             tail.poll()
-            for cid in info["pending_ids"]:
-                nm = tail.calls.get(cid)
-                if nm and nm not in names:
-                    names.append(nm)
-            if not names and tail.last_tool:
-                names = [tail.last_tool]
+            if info["pending_ids"]:
+                for cid in info["pending_ids"]:
+                    nm = tail.calls.get(cid)
+                    if nm and nm not in names:
+                        names.append(nm)
+                if not names and tail.last_tool:
+                    names = [tail.last_tool]
+            slow = tail.slowest(3)
         return TaskInfo(
             session_id=info["session_id"], state=info["state"], title=info["title"],
             provider=info["provider"], model=info["model"], turn=info["turn"],
@@ -1579,7 +1656,7 @@ class StatusWatcher:
             surface_tokens=info["surface_tokens"], context_window=info["context_window"],
             tokens_out=info["tokens_out"], mtime=info["mtime"], goal=info["goal"],
             queued=info["queued"], plan_active=info["plan_active"],
-            turn_open=info["turn_open"])
+            turn_open=info["turn_open"], slow_tools=slow)
 
     def _track_turns(self, infos: list) -> set:
         """检测「回合由开转闭」= 任务完成，返回正在庆祝的会话 id 集合。"""
@@ -1591,6 +1668,13 @@ class StatusWatcher:
             if was is True and open_now is False:      # 刚刚跑完一个回合
                 self._celebrate_until[sid] = now + CELEBRATE_S
                 self._new_completion = True
+                # 记下是谁跑完了 —— 通知气泡要说得出名字，而不是笼统的"任务完成"
+                self._completed.append({
+                    "title": (i.get("title") or sid[:8]).strip(),
+                    "tools": list(i.get("tool_names") or [])[:2],
+                })
+                if len(self._completed) > 8:
+                    del self._completed[:-8]
             self._turn_open[sid] = open_now
             if self._celebrate_until.get(sid, 0) > now:
                 celebrating.add(sid)
@@ -1634,9 +1718,21 @@ class StatusWatcher:
             turn=primary.turn, step=primary.step, started_ms=primary.started_ms,
             tool_names=primary.tool_names, context_pct=primary.context_pct,
             surface_tokens=primary.surface_tokens, context_window=primary.context_window,
-            tokens_out=primary.tokens_out, prompt=primary.prompt)
+            tokens_out=primary.tokens_out, prompt=primary.prompt,
+            slow_tools=primary.slow_tools)
 
-        if state == "waiting":
+        # 完成通知：说得出是哪个会话跑完了，而不是笼统的"任务已完成"。
+        # 只在庆祝刚开始的那几秒里说，不然会一直挂着。
+        if state == "celebrating" and self._completed:
+            item = self._completed[-1]
+            name = item["title"][:18]
+            tools = item["tools"]
+            if tools:
+                snap.detail_line = f"「{name}」跑完了 · {tools[0]}"
+            else:
+                snap.detail_line = f"「{name}」跑完了"
+            snap.bubble = True
+        elif state == "waiting":
             snap.detail_line = "在等你回答"
         elif state == "failed":
             snap.detail_line = "请求出错，正在重试"
@@ -1859,7 +1955,7 @@ class CompanionSource:
                 if idle < 3.0 or (not night and self.mood.energy > 0.85):
                     self._enter("waking", 2.6)
                     if idle < 3.0 and random.random() < 0.35:
-                        self.say(random.choice(WAKE_LINES))
+                        self.say(say_line("WAKE_LINES"))
             elif self.state == "waking":
                 self._enter("idle")
             elif self.state == "yawning":
@@ -1872,13 +1968,13 @@ class CompanionSource:
                 if idle > sleep_after or (tired and idle > 20):
                     self._enter("sleeping")
                     if random.random() < 0.3:
-                        self.say(random.choice(SLEEP_LINES))
+                        self.say(say_line("SLEEP_LINES"))
                 elif idle > IDLE_DOZE:
                     self._enter("dozing")
                 elif idle > IDLE_YAWN:
                     self._enter("yawning", 2.8)
                     if random.random() < 0.4:
-                        self.say(random.choice(YAWN_LINES))
+                        self.say(say_line("YAWN_LINES"))
                 elif self._try_gaze(now, night):
                     pass                                     # 看向鼠标
                 elif not night and self.mood.energy > 0.35 and now > self.next_roam:
@@ -1886,7 +1982,7 @@ class CompanionSource:
                     self.next_roam = now + random.uniform(35, 90)
                     self.wander_target = self._pick_wander_target()
                     if random.random() < 0.25:
-                        self.say(random.choice(ROAM_LINES))
+                        self.say(say_line("ROAM_LINES"))
                 elif now > self.next_peek:
                     self._enter("peeking", random.uniform(3.0, 6.0))
                     self.next_peek = now + random.uniform(120, 300)
@@ -1948,14 +2044,14 @@ class CompanionSource:
         if (m.energy < 0.22 and self.state in ("idle", "roaming", "gazing")
                 and now > self.next_hungry):
             self.next_hungry = now + random.uniform(180, 420)
-            self.say(random.choice(HUNGRY_LINES), 5.0)
+            self.say(say_line("HUNGRY_LINES"), 5.0)
 
         # 太久没人理：叹气 + 亲密度缓慢下降
         lonely_after = 7200.0
         if (now - self.last_touch > lonely_after and self.state in ("idle", "gazing")
                 and now > self.next_lonely):
             self.next_lonely = now + random.uniform(1800, 3600)
-            self.say(random.choice(LONELY_LINES), 5.0)
+            self.say(say_line("LONELY_LINES"), 5.0)
             m.affection = max(0.0, m.affection - 0.01)
 
         # 早晚问候：每个时段只问候一次
@@ -1989,6 +2085,53 @@ LONELY_LINES = ["好久没理我了", "在忙吗", "唉…"]
 MORNING_LINES = ["早啊", "今天也加油", "睡醒啦"]
 NIGHT_LINES = ["还不睡？", "该休息了", "夜深了"]
 EDGE_LINES = ["抓到了", "不松手", "救命…"]
+POMO_DONE_LINES = ["时间到！", "该休息了", "这一轮结束了", "起来走两步吧"]
+
+# ── 台词表 ──────────────────────────────────────────────────────────────────
+# 想换成自己的一套（毒舌版、温柔版…）：把同名键写进 <程序目录>/pet_lines.json，
+# 比如 {"PET_LINES": ["嘿嘿", "再来"], "FEED_LINES": ["谢谢"]}。
+# 没写的键继续用内置默认，所以只覆盖想改的那几条就行。
+LINES_PATH = os.path.join(data_dir(), "pet_lines.json")
+
+_LINE_DEFAULTS = {
+    "WAKE_LINES": WAKE_LINES, "SLEEP_LINES": SLEEP_LINES, "YAWN_LINES": YAWN_LINES,
+    "ROAM_LINES": ROAM_LINES, "PET_LINES": PET_LINES, "FEED_LINES": FEED_LINES,
+    "ANNOY_LINES": ANNOY_LINES, "DIZZY_LINES": DIZZY_LINES, "GRAB_LINES": GRAB_LINES,
+    "HUNGRY_LINES": HUNGRY_LINES, "LONELY_LINES": LONELY_LINES,
+    "MORNING_LINES": MORNING_LINES, "NIGHT_LINES": NIGHT_LINES,
+    "EDGE_LINES": EDGE_LINES, "POMO_DONE_LINES": POMO_DONE_LINES,
+}
+
+
+def load_lines() -> dict:
+    """取台词表：内置默认 + pet_lines.json 的覆盖。
+
+    只接受「非空字符串列表」的值 —— 写错了就当没写，不让一个坏配置文件
+    把桌宠弄成一句话都不说。
+    """
+    table = dict(_LINE_DEFAULTS)
+    try:
+        with open(LINES_PATH, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception:                                    # noqa: BLE001
+        return table
+    if not isinstance(raw, dict):
+        return table
+    for key, val in raw.items():
+        if key not in table:
+            continue
+        if isinstance(val, list) and val and all(isinstance(x, str) and x for x in val):
+            table[key] = val
+    return table
+
+
+LINES = load_lines()
+
+
+def say_line(key: str) -> str:
+    """随机取一句台词。表里没有这个键就返回空串（调用方自己兜底）。"""
+    pool = LINES.get(key) or []
+    return random.choice(pool) if pool else ""
 
 
 def virtual_screen() -> tuple:
@@ -2036,12 +2179,18 @@ def default_position() -> tuple:
 MOD_ALT, MOD_CONTROL, MOD_SHIFT = 0x0001, 0x0002, 0x0004
 WM_HOTKEY, WM_QUIT = 0x0312, 0x0012
 VK_P, VK_F, VK_S = 0x50, 0x46, 0x53
+VK_H, VK_D = 0x48, 0x44
 
 HOTKEYS = {
     1: (MOD_CONTROL | MOD_ALT, VK_P, "toggle"),      # 显示 / 隐藏
     2: (MOD_CONTROL | MOD_ALT, VK_F, "feed"),        # 喂一口
     3: (MOD_CONTROL | MOD_ALT, VK_S, "settings"),    # 打开设置
+    4: (MOD_CONTROL | MOD_ALT, VK_H, "ghost"),       # 截图模式：整个隐藏（连托盘也不显示）
+    5: (MOD_CONTROL | MOD_ALT, VK_D, "focus"),       # 专注模式：她安静待机不冒泡
 }
+
+# 番茄钟时长选项（分钟）
+POMODORO_CHOICES = (25, 45, 60)
 
 
 class HotKeys(threading.Thread):
@@ -2079,6 +2228,44 @@ class HotKeys(threading.Thread):
             u.PostThreadMessageW(self.ident, WM_QUIT, 0, 0)
         except Exception:                                # noqa: BLE001
             pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 自动更新检查
+# ─────────────────────────────────────────────────────────────────────────────
+# 只查 GitHub Releases 的最新 tag，不自动下载 —— 装不装由用户决定。
+# 网络不通、限流、被墙都只算「查不到」，绝不能让桌宠因此启动不了或弹错误。
+
+REPO = "kmm331752-ai/dsh-pet"
+APP_VERSION = "1.1.0"
+UPDATE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_URL = f"https://github.com/{REPO}/releases"
+
+
+def _ver_tuple(text: str) -> tuple:
+    """把 v1.2.3 变成 (1,2,3)；解析不出来就当 (0,)。"""
+    nums = []
+    for part in str(text).lstrip("vV").split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        nums.append(int(digits) if digits else 0)
+    return tuple(nums) or (0,)
+
+
+def check_update(timeout: float = 6.0) -> Optional[str]:
+    """有新版本就返回它的 tag，否则 None。"""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            UPDATE_URL, headers={"User-Agent": f"dsh-pet/{APP_VERSION}",
+                                 "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        tag = str(data.get("tag_name") or "")
+        if tag and _ver_tuple(tag) > _ver_tuple(APP_VERSION):
+            return tag
+    except Exception:                                    # noqa: BLE001
+        pass
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2196,6 +2383,14 @@ class PetApp:
         self._mouse_at = 0.0
         self._cursor_prev = (0, 0)    # 全局鼠标位置的上一次采样（判断"刚动过"）
         self._cursor_at = 0.0
+        # 番茄钟 / 专注模式 / 截图模式
+        self.pomo_until = 0.0         # 计时结束时刻（0 = 没在计时）
+        self.pomo_total = 0
+        self.focus_mode = bool(self.cfg.get("focus", False))
+        self._ghost = False           # 截图模式：连托盘一起藏
+        self._autohide = bool(self.cfg.get("autohide", False))
+        self._peek_until = 0.0        # 贴边隐藏后探出来的时刻
+        self._attention_at = 0.0      # 上次"等待提醒"挪窗口的时刻
         self._long_press_job = None
         self.wander_x = 0             # 溜达时窗口的水平偏移
 
@@ -2300,12 +2495,24 @@ class PetApp:
                                   variable=self.var_sound, command=self._toggle_sound)
         self.menu.add_checkbutton(label="陪伴模式（没任务时自己过日子）",
                                   variable=self.var_companion, command=self._toggle_companion)
+        self.var_focus = self.tk.BooleanVar(value=self.focus_mode)
+        self.menu.add_checkbutton(label="专注模式（安静待机不打扰）",
+                                  variable=self.var_focus, command=self._toggle_focus)
         self.menu.add_separator()
-        self._skin_menu = self.tk.Menu(self.menu, tearoff=0)
+        self._pomo_menu = self.tk.Menu(self.menu, tearoff=0)
+        for mins in POMODORO_CHOICES:
+            self._pomo_menu.add_command(label=f"{mins} 分钟",
+                                        command=lambda m=mins: self._start_pomodoro(m))
+        self._pomo_menu.add_separator()
+        self._pomo_menu.add_command(label="取消计时", command=self._cancel_pomodoro)
+        self.menu.add_cascade(label="番茄钟 🍅", menu=self._pomo_menu)
+        self.menu.add_separator()
         self.menu.add_cascade(label="皮肤", menu=self._skin_menu)
         self._rebuild_skin_menu()
         self.menu.add_separator()
         self.menu.add_command(label="设置…", command=self._open_settings)
+        self.menu.add_command(label="导出相处记录…", command=self._export_record)
+        self.menu.add_command(label="检查更新…", command=self._check_update_async)
         self.menu.add_command(label="退出", command=self._quit)
 
     def _rebuild_skin_menu(self) -> None:
@@ -2548,8 +2755,147 @@ class PetApp:
                 self._feed()
             elif act == "settings":
                 self._open_settings()
+            elif act == "ghost":
+                self._toggle_ghost()
+            elif act == "focus":
+                self.var_focus.set(not self.focus_mode)
+                self._toggle_focus()
             elif act == "quit":
                 self._quit()
+            elif isinstance(act, str) and act.startswith("update:"):
+                tag = act.split(":", 1)[1]
+                if self.companion is not None:
+                    self.companion.say(f"有新版本 {tag}", 6.0)
+                print(f"[update] 有新版本 {tag} -> {RELEASES_URL}")
+
+    # -- 番茄钟 / 专注 / 截图模式 -------------------------------------------
+    def _toggle_focus(self) -> None:
+        """专注模式：她安静待机，不冒泡、不溜达、不主动说话。"""
+        self.focus_mode = bool(self.var_focus.get())
+        if self.companion is not None and self.focus_mode:
+            self.companion.bubble_until = 0.0
+            self.companion.bubble = ""
+        self._save_config()
+
+    def _toggle_ghost(self) -> None:
+        """截图模式：连窗口带托盘一起藏掉，录屏时完全不碍事。"""
+        self._ghost = not getattr(self, "_ghost", False)
+        if self._ghost:
+            self.root.withdraw()
+            if self.tray is not None:
+                try:
+                    self.tray.visible = False
+                except Exception:                        # noqa: BLE001
+                    pass
+        else:
+            self.root.deiconify()
+            if self.tray is not None:
+                try:
+                    self.tray.visible = True
+                except Exception:                        # noqa: BLE001
+                    pass
+
+    def _start_pomodoro(self, minutes: int) -> None:
+        self.pomo_until = time.time() + minutes * 60
+        self.pomo_total = minutes * 60
+        if self.companion is not None:
+            self.companion.say(f"{minutes} 分钟，开始专注", 3.0)
+        self._save_config()
+
+    def _cancel_pomodoro(self) -> None:
+        self.pomo_until = 0.0
+        if self.companion is not None:
+            self.companion.say("番茄钟取消了", 2.5)
+
+    # -- 相处记录导出 / 更新检查 -------------------------------------------
+    def _export_record(self) -> None:
+        """把相处记录画成一张图，方便分享。"""
+        m = self.companion.mood if self.companion else Mood()
+        W, H = 420, 260
+        img = Image.new("RGBA", (W, H), (26, 29, 38, 255))
+        d = ImageDraw.Draw(img)
+        try:
+            f_big = load_font(26, bold=True)
+            f_mid = load_font(15)
+            f_small = load_font(13)
+        except Exception:                                # noqa: BLE001
+            f_big = f_mid = f_small = None
+        d.rounded_rectangle([10, 10, W - 10, H - 10], radius=14,
+                            outline=(70, 78, 96, 255), width=2)
+        d.text((28, 26), f"陪你第 {m.days_together} 天", font=f_big, fill=(240, 243, 248, 255))
+        d.text((28, 62), m.mood_label, font=f_mid, fill=(150, 200, 255, 255))
+        # 亲密度条
+        d.rounded_rectangle([28, 92, W - 28, 100], radius=4, fill=(52, 56, 66, 255))
+        fw = max(4, int((W - 56) * max(0.0, min(1.0, m.affection))))
+        d.rounded_rectangle([28, 92, 28 + fw, 100], radius=4, fill=(255, 128, 168, 255))
+        d.text((28, 108), f"亲密度 {m.affection * 100:.0f}%   精力 {m.energy * 100:.0f}%",
+               font=f_small, fill=(152, 160, 176, 255))
+        rows = [
+            ("被摸", f"{m.pokes} 次"),
+            ("被拖", f"{m.drags} 次"),
+            ("被喂", f"{m.feeds} 次"),
+        ]
+        y = 140
+        for k, v in rows:
+            d.text((28, y), k, font=f_small, fill=(152, 160, 176, 255))
+            vw = d.textlength(v, font=f_small)
+            d.text((W - 28 - vw, y), v, font=f_small, fill=(240, 243, 248, 255))
+            y += 22
+        d.text((28, H - 40), "DSH 桌宠", font=f_small, fill=(110, 118, 134, 255))
+        out = os.path.join(data_dir(), "相处记录.png")
+        try:
+            img.convert("RGB").save(out)
+            print(f"[export] 相处记录 -> {out}")
+            if self.companion is not None:
+                self.companion.say("记好啦", 2.5)
+        except Exception as exc:                         # noqa: BLE001
+            print(f"[warn] 导出失败：{exc}", file=sys.stderr)
+
+    def _check_update_async(self) -> None:
+        """后台查一次新版本，结果塞进动作队列 —— 不阻塞界面。"""
+        def work():
+            tag = check_update()
+            if tag:
+                self._tray_actions.append(f"update:{tag}")
+        try:
+            threading.Thread(target=work, name="dsh-pet-update", daemon=True).start()
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _attention(self) -> None:
+        """卡在「等你回答」时，把她挪到屏幕中间晃一下 —— 别让她安静地举着手被忽略。
+
+        只在状态刚变成 waiting 时挪一次，之后就待在中间，不来回跳。
+        """
+        now = time.time()
+        if now - self._attention_at < 20.0:              # 20 秒内不重复
+            return
+        self._attention_at = now
+        if self._drag is not None or self._drop_job is not None:
+            return
+        vx, vy, vw, vh = virtual_screen()
+        if vw <= 0:
+            return
+        cx = vx + (vw - self.win_w) // 2
+        cy = vy + int(vh * 0.28)
+        self.root.geometry(f"{self.win_w}x{self.win_h}+{cx}+{cy}")
+        self.root.attributes("-topmost", True)
+        self.root.lift()
+
+    def _pomodoro_tick(self, now: float) -> None:
+        """番茄钟计时与到点提醒。"""
+        if not self.pomo_until:
+            return
+        if now < self.pomo_until:
+            remain = int(self.pomo_until - now)
+            self.snap.detail_line = f"🍅 {remain // 60:02d}:{remain % 60:02d}"
+            self.snap.bubble = True                      # 用强调色，跟状态文案区分
+            return
+        # 到点了
+        self.pomo_until = 0.0
+        self._play_sound()
+        if self.companion is not None:
+            self.companion.say(say_line("POMO_DONE_LINES"), 6.0)
 
     def _play_sound(self) -> None:
         if not self.sound:
@@ -2721,11 +3067,11 @@ class PetApp:
                 if self.pet_streak >= ANNOY_AFTER:
                     self.annoyed_until = now + ANNOY_S
                     self.pet_streak = 0
-                    self.companion.say(random.choice(ANNOY_LINES), 2.4)
+                    self.companion.say(say_line("ANNOY_LINES"), 2.4)
                 else:
                     self.petted_until = now + 1.8
                     if self.in_companion and random.random() < 0.3:
-                        self.companion.say(random.choice(PET_LINES))
+                        self.companion.say(say_line("PET_LINES"))
             self._toggle_detail()
         else:
             # 拖到屏幕边缘附近 —— 她会抓住不放
@@ -2748,7 +3094,7 @@ class PetApp:
         if self.companion is None:
             return
         self.companion.touch("feed")
-        self.companion.say(random.choice(FEED_LINES), 3.5)
+        self.companion.say(say_line("FEED_LINES"), 3.5)
         durs = self.reaction_durs.get("poke") or []
         if durs:
             self.poke_until = time.time() + sum(durs) / 1000.0
@@ -2830,6 +3176,14 @@ class PetApp:
                     if self.companion is not None:
                         self.companion.wake()
                 self.snap = snap
+                # 番茄钟 / 专注模式 / 等待提醒
+                self._pomodoro_tick(time.time())
+                if self.focus_mode:
+                    self.snap.bubble = False                 # 专注时不冒泡
+                    if self.companion is not None:
+                        self.companion.bubble_until = 0.0
+                if self.snap.state == "waiting" and not self.focus_mode:
+                    self._attention()                        # 卡在你这儿就走到屏幕中间
                 # 溜达：把窗口朝目标位置挪一点。拖动中不抢方向盘。
                 if (self.in_companion and self.snap.wander and self._drag is None
                         and getattr(self, "_drop_job", None) is None):
@@ -2913,6 +3267,9 @@ class PetApp:
                     sprite = Image.alpha_composite(sprite, ov)
             if self.snap.mirror:                         # 看向左边：水平翻转
                 sprite = ImageOps.mirror(sprite)
+            dots = session_dots(self.snap.tasks)         # 多任务时脚边排一排圆点
+            if dots is not None:
+                sprite = Image.alpha_composite(sprite, dots)
 
             card_key = (st, self.snap.detail_line, self.snap.idle_hint, self.detail,
                         self.privacy,
