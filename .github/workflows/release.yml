@@ -40,7 +40,11 @@ jobs:
       - name: 装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pillow zstandard pyinstaller
+          # 这几个必须和 README 里写的可选依赖一致 —— 漏装不会报错，
+          # 只会让打出来的 exe 悄悄少功能：numpy 缺了 clawd 主题的 SVG
+          # 光栅化会失败，pystray 缺了没有托盘图标。
+          # （实测：漏装 numpy 时 exe 从 51MB 缩到 31MB，不容易发现。）
+          pip install pillow zstandard numpy pystray pyinstaller
 
       - name: 跑测试（测试不过就不发版）
         run: python tests/test_pet.py
@@ -54,8 +58,11 @@ jobs:
           if (-not (Test-Path $exe)) { throw "没找到 $exe" }
           $mb = (Get-Item $exe).Length / 1MB
           Write-Host "产物大小: $([math]::Round($mb,1)) MB"
-          # 夹带了 clawd 素材的话会明显大于这个数（那批有 168MB）
+          # 上限：夹带了 clawd 素材的话会明显大于这个数（那批有 168MB）
           if ($mb -gt 120) { throw "exe 异常大（$mb MB），可能夹带了不该分发的素材" }
+          # 下限：漏装 numpy/pystray 的话会明显偏小。51MB 是带全依赖的实测值，
+          # 31MB 就是漏了 numpy 的样子 —— 这种"少功能"不会报错，只能靠体积拦。
+          if ($mb -lt 42) { throw "exe 偏小（$mb MB），可能漏装了 numpy/pystray" }
 
       - name: 发布
         uses: softprops/action-gh-release@v2
