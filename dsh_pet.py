@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from ctypes import wintypes
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 基本配置
@@ -82,6 +82,8 @@ WIN_W = 248                      # 窗口逻辑宽度
 PET_AREA_H = 182                 # 角色区高度
 DETAIL_CARD_H = 148              # 详情展开时的信息卡高度
 WIN_H = PET_AREA_H + DETAIL_CARD_H
+# 滚轮缩放范围。窗口和内容一起缩，太小会看不清信息卡，太大又挡屏幕。
+SCALE_MIN, SCALE_MAX = 0.6, 2.0
 SS = 2                           # 超采样倍数（素材 306px，2 倍即原生分辨率）
 POLL_MS = 350                    # 状态轮询间隔
 TICK_MS = 95                     # 动画帧间隔
@@ -97,6 +99,8 @@ PALETTE = {
     "offline":     dict(accent="#6B7075", label="离线",   dot="#9AA0A6"),
     # ── 陪伴模式的状态（没有 DSH 任务时她自己过日子）──
     "roaming":     dict(accent="#3F9E9E", label="溜达",   dot="#6FC7C7"),
+    "gazing":      dict(accent="#4E8FB8", label="看你",   dot="#7FBEDC"),
+    "peeking":     dict(accent="#6E8FB0", label="探头",   dot="#9BB8D4"),
     "yawning":     dict(accent="#8A7BA8", label="犯困",   dot="#B3A6CC"),
     "dozing":      dict(accent="#5E6E92", label="打盹",   dot="#8B9BC0"),
     "sleeping":    dict(accent="#4A5568", label="睡着了", dot="#7A8699"),
@@ -122,7 +126,8 @@ TEXT_MAIN = (240, 243, 248, 255)
 TEXT_DIM = (152, 160, 176, 255)
 
 STATE_ORDER = ["idle", "thinking", "tools", "waiting", "failed", "celebrating", "offline",
-               "roaming", "yawning", "dozing", "sleeping", "waking", "petted"]
+               "roaming", "gazing", "peeking", "yawning", "dozing", "sleeping", "waking",
+               "petted"]
 
 # 状态优先级：越小越优先成为「聚合状态」——
 # 等你回答最要紧（卡在你这），其次出错，再是干活
@@ -130,11 +135,29 @@ STATE_RANK = {"waiting": 0, "failed": 1, "tools": 2, "thinking": 3, "celebrating
 ACTIVE_STATES = ("waiting", "failed", "tools", "thinking")
 
 # 陪伴模式才用的状态：只有 DSH 那边一个活跃会话都没有时才会出现
-COMPANION_STATES = ("roaming", "yawning", "dozing", "sleeping", "waking", "petted")
+COMPANION_STATES = ("roaming", "gazing", "peeking", "yawning", "dozing",
+                    "sleeping", "waking", "petted")
 # 这些状态不该被 DSH 的任务状态覆盖掉（睡着了就别被"空闲"叫醒）
 COMPANION_HOLD = ("dozing", "sleeping", "waking", "petted")
 
 CELEBRATE_S = 6.0                # 完成庆祝持续秒数
+
+# ── 交互参数 ────────────────────────────────────────────────────────────────
+HOVER_DELAY = 1.0                # 鼠标在她身上停多久，她注意到你
+LONG_PRESS_MS = 2000             # 按住不动多久算「抱起来」
+SHAKE_WINDOW = 0.6               # 判定甩动的时间窗（秒）
+SHAKE_DIRS = 5                   # 窗口内要换几次方向才算甩
+SHAKE_DIZZY_S = 3.2              # 甩晕持续秒数
+ANNOY_AFTER = 5                  # 连续摸几次会烦
+ANNOY_WINDOW = 6.0               # 连续摸的判定窗口（秒）
+ANNOY_S = 2.6                    # 烦多久
+EDGE_SNAP = 6                    # 拖到离屏幕边缘多近算「抓住」（像素）
+GRAVITY = 2.2                    # 松手下落加速度
+TASKBAR_MARGIN = 8               # 落地时离屏幕底部留多少
+GAZE_FRESH = 2.5                 # 鼠标动过多久之内她会看过去（秒）
+GAZE_MIN_DX = 90                 # 鼠标离她多远才值得转头（像素）
+GAZE_HOLD = 1.6                  # 看多久
+WANDER_STEP = 3                  # 溜达时每帧移动多少像素（越小越自然）
 
 # 角色素材来自 1190fasheqi/dafeiyu-pet（MIT），见 assets/ATTRIBUTION.md
 ASSETS = os.path.join(app_dir(), "assets")
@@ -143,7 +166,8 @@ VIEW_FOR_STATE = {"idle": "front", "thinking": "front", "tools": "side",
                   "waiting": "front", "failed": "front",
                   "celebrating": "front", "offline": "back",
                   # 陪伴模式：溜达用侧身，睡着翻到背面（缩成一团的感觉）
-                  "roaming": "side", "yawning": "front", "dozing": "front",
+                  "roaming": "side", "gazing": "side", "peeking": "side",
+                  "yawning": "front", "dozing": "front",
                   "sleeping": "back", "waking": "front", "petted": "front"}
 _VIEW_CACHE: dict = {}
 _GLOW_CACHE: dict = {}
@@ -374,6 +398,138 @@ def _glow_layer(state: str) -> Image.Image:
     return layer
 
 
+def _star_points(cx: float, cy: float, r_out: float, r_in: float, n: int,
+                 rot: float) -> list:
+    """五角星（或 n 角星）的顶点，用于晕眩星星。"""
+    pts = []
+    for i in range(n * 2):
+        r = r_out if i % 2 == 0 else r_in
+        a = rot + i * math.pi / n
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
+
+
+def _overlay_layer(kind: str, phase: float) -> Image.Image:
+    """画在角色之上的交互装饰。
+
+    全部程序化生成，不依赖素材 —— 这样任何皮肤（包括只有静态图的 clawd
+    主题）都能共用同一套交互反馈。每帧现画，但只有几个图元，开销可忽略。
+    """
+    W, H = WIN_W * SS, PET_AREA_H * SS
+    s = SS
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    if not kind:
+        return layer
+    d = ImageDraw.Draw(layer)
+    cx = W // 2
+    # 头顶位置：角色贴底站立，头顶大约在画面上方 8% 处
+    top_y = int(H * 0.10)
+
+    if kind == "stars":
+        # 晕眩：三颗星绕头顶转圈，各自相位错开
+        for i in range(3):
+            a = phase * 2 * math.pi * 2 + i * (2 * math.pi / 3)
+            r = W * 0.20
+            sx = cx + r * math.cos(a)
+            sy = top_y + r * 0.34 * math.sin(a)
+            size = (7 + 2 * math.sin(a)) * s
+            col = (255, 214, 92, 235) if i % 2 == 0 else (255, 178, 72, 225)
+            d.polygon(_star_points(sx, sy, size, size * 0.44, 5, a), fill=col)
+
+    elif kind == "zzz":
+        # 睡觉：三个 z 依次往上飘并淡出
+        for i in range(3):
+            t = (phase + i / 3.0) % 1.0
+            zx = cx + (W * 0.14) + t * (W * 0.12)
+            zy = top_y + H * 0.26 - t * (H * 0.18)
+            alpha = int(245 * (1.0 - t * 0.75))
+            if alpha <= 20:
+                continue
+            size = int((13 + 9 * t) * s)
+            f = load_font(size, bold=True)
+            d.text((zx, zy), "z", font=f, fill=(214, 226, 255, alpha),
+                   stroke_width=max(1, s), stroke_fill=(70, 84, 120, alpha))
+
+    elif kind == "question":
+        # 悬停：头顶冒一个上下轻晃的问号
+        bob = math.sin(phase * 2 * math.pi * 2) * 4 * s
+        qx, qy = cx + W * 0.17, top_y + H * 0.06 + bob
+        size = 20 * s
+        try:
+            f = load_font(size)
+        except Exception:                                # noqa: BLE001
+            f = None
+        if f is not None:
+            d.text((qx, qy), "?", font=f, fill=(150, 200, 255, 240))
+        else:
+            d.ellipse([qx, qy, qx + size, qy + size], outline=(150, 200, 255, 240),
+                      width=max(1, 2 * s))
+
+    elif kind == "angry":
+        # 摸烦了：头顶冒十字怒气符号
+        ax, ay = cx + W * 0.18, top_y + H * 0.08
+        r = 9 * s
+        col = (240, 96, 96, 240)
+        w = max(2, int(2.6 * s))
+        d.line([ax - r, ay, ax + r, ay], fill=col, width=w)
+        d.line([ax, ay - r, ax, ay + r], fill=col, width=w)
+        d.line([ax - r * 0.6, ay - r * 0.6, ax + r * 0.6, ay + r * 0.6], fill=col, width=w)
+        d.line([ax - r * 0.6, ay + r * 0.6, ax + r * 0.6, ay - r * 0.6], fill=col, width=w)
+
+    elif kind == "heart":
+        # 被摸开心：飘两颗心
+        for i in range(2):
+            t = (phase + i * 0.5) % 1.0
+            hx = cx + W * 0.13 + i * W * 0.09
+            hy = top_y + H * 0.12 - t * (H * 0.16)
+            alpha = int(225 * (1.0 - t))
+            if alpha <= 8:
+                continue
+            r = (6 + 3 * t) * s
+            col = (255, 128, 168, alpha)
+            d.ellipse([hx - r, hy - r, hx, hy], fill=col)
+            d.ellipse([hx, hy - r, hx + r, hy], fill=col)
+            d.polygon([(hx - r, hy - r * 0.25), (hx + r, hy - r * 0.25),
+                       (hx, hy + r * 1.15)], fill=col)
+
+    elif kind == "sweat":
+        # 被抓起来挣扎：一颗汗
+        t = (phase * 3) % 1.0
+        sx = cx - W * 0.19
+        sy = top_y + H * 0.10 + t * H * 0.10
+        r = 6 * s
+        d.ellipse([sx - r, sy - r * 1.3, sx + r, sy + r * 0.7],
+                  fill=(150, 205, 255, 215))
+
+    elif kind == "note":
+        # 心情好：飘一个音符
+        t = (phase + 0.2) % 1.0
+        nx = cx + W * 0.13
+        ny = top_y + H * 0.30 - t * (H * 0.18)
+        alpha = int(240 * (1.0 - t * 0.7))
+        if alpha > 20:
+            r = 8 * s
+            col = (150, 226, 176, alpha)
+            d.ellipse([nx - r, ny, nx + r, ny + r * 1.7], fill=col)
+            d.line([nx + r, ny + r * 0.9, nx + r, ny - r * 2.4],
+                   fill=col, width=max(2, int(2.4 * s)))
+            d.line([nx + r, ny - r * 2.4, nx + r * 2.4, ny - r * 1.7],
+                   fill=col, width=max(2, int(2.4 * s)))
+
+    return layer
+
+
+def overlay_for(kind: str, phase: float):
+    """取一张缩到最终尺寸的叠加图形；kind 为空返回 None。
+
+    在 _tick 里对**所有皮肤**统一叠加 —— 契约和 clawd 主题的帧是预渲染的，
+    画在 render_pet 里就只有内置皮肤能用。
+    """
+    if not kind:
+        return None
+    return _overlay_layer(kind, phase).resize((WIN_W, PET_AREA_H), Image.LANCZOS)
+
+
 def render_pet(state: str, phase: float) -> Image.Image:
     """渲染一帧角色：素材 + 呼吸/弹跳/摇摆 + 状态配件。
 
@@ -478,7 +634,7 @@ ATLAS_SIZE = (ATLAS_COLS * ATLAS_CW, ATLAS_ROWS * ATLAS_CH)
 # 溜达借「向右跑」，犯困/打盹借待机，刚醒借挥手（伸懒腰），被摸借跳跃。
 ATLAS_ROW = {"idle": 0, "tools": 7, "thinking": 8, "waiting": 6,
              "failed": 5, "celebrating": 4, "offline": 0,
-             "roaming": 1, "yawning": 0, "dozing": 0,
+             "roaming": 1, "gazing": 1, "peeking": 0, "yawning": 0, "dozing": 0,
              "sleeping": 0, "waking": 3, "petted": 4}
 # 行的 (中间帧, 末帧) 毫秒，取自契约的逐帧时长
 ATLAS_TIMING = {
@@ -591,6 +747,8 @@ CLAWD_STATE_MAP = {
     "offline":     ["sleeping", "collapsing", "dozing"],
     # 陪伴模式：clawd 主题本来就有这些状态，正好对得上
     "roaming":     ["roam", "idle"],
+    "gazing":      ["roam", "idle"],
+    "peeking":     ["idle", "roam"],
     "yawning":     ["yawning", "dozing", "idle"],
     "dozing":      ["dozing", "sleeping", "idle"],
     "sleeping":    ["sleeping", "dozing", "collapsing"],
@@ -1109,6 +1267,8 @@ class Snapshot:
     detail_line: str = ""
     forced: bool = False
     bubble: bool = False                              # detail_line 是她说的话，用强调色画
+    mirror: bool = False                              # 水平翻转（看向左边时用）
+    wander: float = 0.0                               # 窗口水平目标位置（绝对坐标，0 = 不动）
 
     @property
     def elapsed_ms(self) -> Optional[float]:
@@ -1525,6 +1685,18 @@ NIGHT_IDLE_SLEEP = 30.0
 NIGHT_HOURS = (23, 7)            # [23:00, 07:00)
 
 
+def cursor_pos() -> tuple:
+    """当前鼠标的屏幕坐标。
+
+    用 GetCursorPos 而不是 Tk 的 <Motion> —— 鼠标在窗口外时收不到 Motion 事件，
+    而她要看的是整个桌面上的鼠标。
+    """
+    pt = wintypes.POINT()
+    if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+        return int(pt.x), int(pt.y)
+    return (0, 0)
+
+
 def idle_seconds() -> float:
     """距上次键盘/鼠标输入过了多久（秒）。取不到就返回 0。"""
     class _LastInput(ctypes.Structure):
@@ -1551,6 +1723,8 @@ class Mood:
     first_seen: float = 0.0         # 第一次见面
     last_seen: float = 0.0          # 上次运行
     last_tick: float = 0.0          # 上次结算时间（算精力增减用）
+    greeted: str = ""               # 已经问候过的时段（morning / night），避免重复
+    unlocked: int = 0               # 已解锁的相处天数里程碑
 
     @property
     def days_together(self) -> int:
@@ -1582,9 +1756,19 @@ class CompanionSource:
         self.state = "idle"
         self.state_until = 0.0          # 当前状态至少保持到什么时候
         self.next_roam = time.time() + random.uniform(25, 70)
+        self.next_peek = time.time() + random.uniform(120, 300)
+        self.next_hungry = time.time() + random.uniform(180, 420)
+        self.next_lonely = time.time() + random.uniform(1800, 3600)
         self.bubble = ""                # 当前要显示的气泡文案
         self.bubble_until = 0.0
         self._entered = time.time()
+        self.last_touch = time.time()   # 上次被互动的时刻（判断"太久没人理"）
+        # 看向鼠标：PetApp 每次 poll 前把这些填进来
+        self.mouse_x = 0                # 鼠标屏幕 x
+        self.mouse_at = 0.0             # 鼠标最后活动时刻
+        self.pet_x = 0                  # 桌宠窗口左边 x
+        self.gaze_dir = 1               # 1 向右看，-1 向左看
+        self.wander_target = 0.0        # 溜达的窗口目标 x（0 = 不动）
 
     # -- 持久化 -------------------------------------------------------------
     def _load(self) -> Mood:
@@ -1613,6 +1797,7 @@ class CompanionSource:
     # -- 互动 ---------------------------------------------------------------
     def touch(self, kind: str) -> None:
         """用户互动时调用：poke / drag / feed。会把她弄精神，亲密度上涨。"""
+        self.last_touch = time.time()
         if kind == "poke":
             self.mood.pokes += 1
             self.mood.affection = min(1.0, self.mood.affection + 0.02)
@@ -1679,10 +1864,9 @@ class CompanionSource:
                 self._enter("idle")
             elif self.state == "yawning":
                 self._enter("dozing", 0.0)
-            elif self.state == "roaming":
+            elif self.state in ("roaming", "gazing", "peeking", "petted"):
                 self._enter("idle")
-            elif self.state == "petted":
-                self._enter("idle")
+                self.wander_target = 0.0                     # 停下就别再挪窗口
             elif self.state == "idle":
                 sleep_after = NIGHT_IDLE_SLEEP if (night or tired) else IDLE_SLEEP
                 if idle > sleep_after or (tired and idle > 20):
@@ -1695,11 +1879,19 @@ class CompanionSource:
                     self._enter("yawning", 2.8)
                     if random.random() < 0.4:
                         self.say(random.choice(YAWN_LINES))
+                elif self._try_gaze(now, night):
+                    pass                                     # 看向鼠标
                 elif not night and self.mood.energy > 0.35 and now > self.next_roam:
                     self._enter("roaming", random.uniform(4.0, 8.0))
                     self.next_roam = now + random.uniform(35, 90)
+                    self.wander_target = self._pick_wander_target()
                     if random.random() < 0.25:
                         self.say(random.choice(ROAM_LINES))
+                elif now > self.next_peek:
+                    self._enter("peeking", random.uniform(3.0, 6.0))
+                    self.next_peek = now + random.uniform(120, 300)
+
+        self._situational(now, idle, night)
 
         # ── 组装 Snapshot ──
         m = self.mood
@@ -1710,11 +1902,76 @@ class CompanionSource:
         snap.tokens_out = float(m.pokes + m.drags + m.feeds)
         snap.phase = random.random()
         snap.forced = True
+        # 看向哪边 / 溜达到哪 —— 交给 PetApp 去动窗口
+        snap.mirror = self.gaze_dir < 0
+        snap.wander = self.wander_target
         # 气泡：她说的话占用副行文案，但用强调色画出来，并进 _card_cache 的键
         if now < self.bubble_until and self.bubble:
             snap.detail_line = self.bubble
             snap.bubble = True
         return snap
+
+    # -- 溜达目标 -----------------------------------------------------------
+    def _pick_wander_target(self) -> float:
+        """挑一个溜达目的地。
+
+        多数时候就在附近走两步；偶尔（1/8）换一块显示器 —— 多屏时她会跑过去。
+        """
+        vx, vy, vw, vh = virtual_screen()
+        if vw <= 0:
+            return 0.0
+        cur = float(self.pet_x)
+        if random.random() < 0.125 and vw > WIN_W * 3:
+            return float(random.randint(vx, max(vx, vx + vw - WIN_W)))
+        step = random.uniform(-200, 200)
+        return float(max(vx, min(vx + vw - WIN_W, cur + step)))
+
+    # -- 看向鼠标 -----------------------------------------------------------
+    def _try_gaze(self, now: float, night: bool) -> bool:
+        """鼠标在附近动过就转头看他。返回是否接管了本帧。"""
+        if night or now - self.mouse_at > GAZE_FRESH:
+            return False
+        dx = self.mouse_x - self.pet_x
+        if abs(dx) < GAZE_MIN_DX:
+            return False
+        self.gaze_dir = 1 if dx > 0 else -1
+        self._enter("gazing", GAZE_HOLD)
+        self.next_roam = now + random.uniform(30, 80)        # 别马上又去溜达
+        return True
+
+    # -- 情境互动 -----------------------------------------------------------
+    def _situational(self, now: float, idle: float, night: bool) -> None:
+        """饿了、太久没人理、早晚问候、陪满天数解锁。都是低频触发。"""
+        m = self.mood
+
+        # 饿了她会主动要吃的
+        if (m.energy < 0.22 and self.state in ("idle", "roaming", "gazing")
+                and now > self.next_hungry):
+            self.next_hungry = now + random.uniform(180, 420)
+            self.say(random.choice(HUNGRY_LINES), 5.0)
+
+        # 太久没人理：叹气 + 亲密度缓慢下降
+        lonely_after = 7200.0
+        if (now - self.last_touch > lonely_after and self.state in ("idle", "gazing")
+                and now > self.next_lonely):
+            self.next_lonely = now + random.uniform(1800, 3600)
+            self.say(random.choice(LONELY_LINES), 5.0)
+            m.affection = max(0.0, m.affection - 0.01)
+
+        # 早晚问候：每个时段只问候一次
+        hour = time.localtime().tm_hour
+        slot = "morning" if 5 <= hour < 11 else ("night" if hour >= 22 or hour < 2 else "")
+        if slot and self.greeted != slot and self.state == "idle":
+            self.greeted = slot
+            self.save()
+            self.say(random.choice(MORNING_LINES if slot == "morning" else NIGHT_LINES), 5.0)
+
+        # 陪满整周解锁新台词
+        days = m.days_together
+        if days >= 7 and self.unlocked < 7:
+            self.unlocked = 7
+            self.save()
+            self.say(f"我们认识 {days} 天啦", 5.0)
 
 
 # 陪伴模式的文案表。想改直接改这里。
@@ -1724,6 +1981,14 @@ YAWN_LINES = ["啊——欠", "好无聊啊", "你在忙什么", "有点困了"]
 ROAM_LINES = ["溜达一圈", "活动活动", "看看窗外", "嗯…走两步"]
 PET_LINES = ["嘿嘿", "好舒服", "再摸摸", "最喜欢你了"]
 FEED_LINES = ["好吃！", "谢谢投喂", "还有吗", "满足了"]
+ANNOY_LINES = ["别摸了…", "够了够了", "手拿开", "烦不烦"]
+DIZZY_LINES = ["晕…", "别甩了！", "天旋地转", "放我下来"]
+GRAB_LINES = ["喂！", "放开我", "干嘛呀", "别拎着我"]
+HUNGRY_LINES = ["有点饿了…", "想吃东西", "喂我一口嘛"]
+LONELY_LINES = ["好久没理我了", "在忙吗", "唉…"]
+MORNING_LINES = ["早啊", "今天也加油", "睡醒啦"]
+NIGHT_LINES = ["还不睡？", "该休息了", "夜深了"]
+EDGE_LINES = ["抓到了", "不松手", "救命…"]
 
 
 def virtual_screen() -> tuple:
@@ -1758,6 +2023,62 @@ def default_position() -> tuple:
     u = ctypes.windll.user32
     sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)        # SM_CX/YSCREEN
     return sw - WIN_W - 40, sh - WIN_H - 90
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 全局热键
+# ─────────────────────────────────────────────────────────────────────────────
+# RegisterHotKey 的 hwnd 传 NULL 时，WM_HOTKEY 会投递到【线程】的消息队列，
+# 所以必须自己起一个线程跑 GetMessage —— Tk 的消息循环拿不到我们的消息。
+# 回调不直接碰界面（Tk 只能在主线程操作），而是把动作名塞进队列，
+# 由主线程的 _drain_tray 消费 —— 和托盘回调走同一条路。
+
+MOD_ALT, MOD_CONTROL, MOD_SHIFT = 0x0001, 0x0002, 0x0004
+WM_HOTKEY, WM_QUIT = 0x0312, 0x0012
+VK_P, VK_F, VK_S = 0x50, 0x46, 0x53
+
+HOTKEYS = {
+    1: (MOD_CONTROL | MOD_ALT, VK_P, "toggle"),      # 显示 / 隐藏
+    2: (MOD_CONTROL | MOD_ALT, VK_F, "feed"),        # 喂一口
+    3: (MOD_CONTROL | MOD_ALT, VK_S, "settings"),    # 打开设置
+}
+
+
+class HotKeys(threading.Thread):
+    """全局热键监听线程。命中的动作名交给 sink，由主线程处理。"""
+
+    def __init__(self, sink):
+        super().__init__(name="dsh-pet-hotkeys", daemon=True)
+        self.sink = sink
+        self.registered: list = []
+
+    def run(self) -> None:
+        u = ctypes.windll.user32
+        for hid, (mods, vk, _) in HOTKEYS.items():
+            if u.RegisterHotKey(None, hid, mods, vk):
+                self.registered.append(hid)
+        if not self.registered:
+            return
+        msg = wintypes.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == WM_HOTKEY:
+                entry = HOTKEYS.get(int(msg.wParam))
+                if entry is not None:
+                    try:
+                        self.sink(entry[2])
+                    except Exception:                    # noqa: BLE001
+                        pass
+
+    def stop(self) -> None:
+        """注销并让消息循环退出（PostThreadMessage 打断 GetMessage）。"""
+        u = ctypes.windll.user32
+        for hid in self.registered:
+            u.UnregisterHotKey(None, hid)
+        self.registered = []
+        try:
+            u.PostThreadMessageW(self.ident, WM_QUIT, 0, 0)
+        except Exception:                                # noqa: BLE001
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1829,10 +2150,14 @@ class PetApp:
         dx, dy = default_position()
         x = int(self.cfg.get("x", dx))
         y = int(self.cfg.get("y", dy))
+        # 缩放要在几何之前算好 —— 窗口尺寸由它决定
+        self.scale = max(SCALE_MIN, min(SCALE_MAX, float(self.cfg.get("scale", 1.0))))
+        self.win_w = max(60, int(round(WIN_W * self.scale)))
+        self.win_h = max(80, int(round(WIN_H * self.scale)))
         x, y = clamp_position(x, y)                      # 拔掉副屏后可能已经在屏幕外
-        self.root.geometry(f"{WIN_W}x{WIN_H}+{x}+{y}")
+        self.root.geometry(f"{self.win_w}x{self.win_h}+{x}+{y}")
 
-        self.display, self.backend = make_display(self.root, WIN_W, WIN_H)
+        self.display, self.backend = make_display(self.root, self.win_w, self.win_h)
 
         self.watcher = None if (args.demo or args.force_state) else \
             StatusWatcher(pinned=args.session)
@@ -1852,6 +2177,27 @@ class PetApp:
         self.poke_until = 0.0
         self._tray_actions: list = []
         self._last_sound = 0.0
+
+        # ── 交互状态 ──
+        # 缩放（scale / win_w / win_h）已在几何之前初始化，这里只补其余交互状态。
+        self.hover_since = 0.0        # 鼠标停在她身上的起始时刻
+        self.hover_until = 0.0        # 悬停反应持续到什么时候
+        self.dizzy_until = 0.0        # 被甩晕
+        self.annoyed_until = 0.0      # 被摸烦了
+        self.petted_until = 0.0       # 摸得开心
+        self.pet_streak = 0           # 连续摸的次数（超了就烦）
+        self.pet_streak_at = 0.0
+        self.grabbed = False          # 长按"抱起来"
+        self.grab_edge = None         # 抓住屏幕边缘时贴的是哪一边
+        self._press_at = 0.0
+        self._press_xy = (0, 0)
+        self._shake = []              # 甩动检测：最近几次拖动的方向与时刻
+        self._mouse = (0, 0)          # 最近一次鼠标位置（用来看向鼠标）
+        self._mouse_at = 0.0
+        self._cursor_prev = (0, 0)    # 全局鼠标位置的上一次采样（判断"刚动过"）
+        self._cursor_at = 0.0
+        self._long_press_job = None
+        self.wander_x = 0             # 溜达时窗口的水平偏移
 
         self.skin = load_skin(getattr(args, "skin", None) or self.cfg.get("skin", "dafeiyu"))
         self._build_sprites()
@@ -1876,6 +2222,7 @@ class PetApp:
         cfg["privacy"] = self.privacy
         cfg["sound"] = self.sound
         cfg["skin"] = self.skin.name
+        cfg["scale"] = round(self.scale, 3)
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
                 json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -1931,6 +2278,10 @@ class PetApp:
         r.bind("<B1-Motion>", self._on_drag)
         r.bind("<ButtonRelease-1>", self._on_release)
         r.bind("<Button-3>", self._on_menu)
+        r.bind("<Motion>", self._on_motion)               # 悬停反应 + 看向鼠标
+        r.bind("<Leave>", self._on_leave)
+        r.bind("<MouseWheel>", self._on_wheel)            # 滚轮缩放
+        r.bind("<Double-Button-1>", self._on_double)      # 双击开设置
 
         self.menu = self.tk.Menu(r, tearoff=0)
         self.menu.add_command(label="喂一口 🍡", command=self._feed)
@@ -2107,6 +2458,11 @@ class PetApp:
         status = tk.Label(win, text="", fg="#666")
         status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
         row += 1
+        tk.Label(win, text="热键：Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置\n"
+                           "滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜",
+                 justify="left", fg="#777").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 0))
+        row += 1
         tk.Button(win, text="关闭", width=10, command=lambda: (
             win.destroy(), setattr(self, "_settings_win", None))).grid(
             row=row, column=0, columnspan=2, pady=(6, 14))
@@ -2116,6 +2472,15 @@ class PetApp:
         self.tray = None
         self._tray_key = None
         self._hidden = False
+        # 全局热键：和托盘共用动作队列，都在主线程消费
+        self.hotkeys = None
+        if not getattr(self.args, "no_hotkeys", False):
+            try:
+                self.hotkeys = HotKeys(sink=self._tray_actions.append)
+                self.hotkeys.start()
+            except Exception as exc:                     # noqa: BLE001
+                print(f"[warn] 全局热键注册失败：{exc}", file=sys.stderr)
+                self.hotkeys = None
         try:
             import pystray
             menu = pystray.Menu(
@@ -2179,6 +2544,10 @@ class PetApp:
             elif act == "privacy":
                 self.var_privacy.set(not self.privacy)
                 self._toggle_privacy()
+            elif act == "feed":
+                self._feed()
+            elif act == "settings":
+                self._open_settings()
             elif act == "quit":
                 self._quit()
 
@@ -2196,10 +2565,113 @@ class PetApp:
         except Exception:                                 # noqa: BLE001
             pass
 
+    # -- 缩放 ---------------------------------------------------------------
+    def _overlay_kind(self, now: float) -> str:
+        """当前该画哪个交互装饰。交互优先于状态 —— 你碰她的时候先回应你。"""
+        if now < self.dizzy_until:
+            return "stars"
+        if self.grabbed:
+            return "sweat"
+        if now < self.annoyed_until:
+            return "angry"
+        if now < self.petted_until:
+            return "heart"
+        if self.hover_since and now - self.hover_since > HOVER_DELAY:
+            return "question"
+        if self.snap.state == "sleeping":
+            return "zzz"
+        if self.snap.state == "celebrating":
+            return "note"
+        return ""
+
+    def _apply_scale(self, new_scale: float) -> None:
+        """改变缩放：重建显示层与窗口几何，以窗口中心为锚点。"""
+        new_scale = max(SCALE_MIN, min(SCALE_MAX, new_scale))
+        if abs(new_scale - self.scale) < 0.005:
+            return
+        old_w, old_h = self.win_w, self.win_h
+        self.scale = new_scale
+        self.win_w = max(60, int(round(WIN_W * self.scale)))
+        self.win_h = max(80, int(round(WIN_H * self.scale)))
+        x = self.root.winfo_x() + (old_w - self.win_w) // 2
+        y = self.root.winfo_y() + (old_h - self.win_h) // 2
+        self.display, self.backend = make_display(self.root, self.win_w, self.win_h)
+        x, y = clamp_position(x, y)
+        self.root.geometry(f"{self.win_w}x{self.win_h}+{x}+{y}")
+        self._card_cache = (None, None)
+        self._save_config()
+
+    # -- 鼠标交互 -----------------------------------------------------------
+    def _on_motion(self, e):
+        """鼠标在窗口内移动：记录位置（她会看向鼠标），并开始计悬停。"""
+        self._mouse = (e.x_root, e.y_root)
+        self._mouse_at = time.time()
+        if self.hover_since == 0.0:
+            self.hover_since = time.time()
+
+    def _on_leave(self, _e):
+        self.hover_since = 0.0
+
+    def _on_wheel(self, e):
+        """滚轮缩放。Windows 上 delta 是 120 的整数倍。"""
+        self._apply_scale(self.scale + (0.1 if e.delta > 0 else -0.1))
+
+    def _on_double(self, _e):
+        """双击打开设置。标记 _moved 免得 release 又当成一次「摸」。"""
+        self._moved = True
+        self._cancel_long_press()
+        self._open_settings()
+
+    def _cancel_long_press(self) -> None:
+        if self._long_press_job is not None:
+            try:
+                self.root.after_cancel(self._long_press_job)
+            except Exception:                            # noqa: BLE001
+                pass
+            self._long_press_job = None
+
+    def _long_press_fired(self) -> None:
+        """按住不动够久 —— 把她「抱起来」，她会挣扎。"""
+        self._long_press_job = None
+        if self._drag is None or self._moved:
+            return
+        self.grabbed = True
+
+    def _drop(self) -> None:
+        """松手：她往下掉，落到屏幕底部。"""
+        self.grabbed = False
+        if getattr(self, "_drop_job", None) is not None:
+            try:
+                self.root.after_cancel(self._drop_job)
+            except Exception:                            # noqa: BLE001
+                pass
+        floor = self.root.winfo_screenheight() - self.win_h - TASKBAR_MARGIN
+        vel = 0.0
+
+        def step():
+            nonlocal vel
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            if y >= floor:
+                self.root.geometry(f"+{x}+{floor}")
+                self._drop_job = None
+                self._save_config()
+                return
+            vel += GRAVITY
+            ny = min(floor, y + int(vel))
+            self.root.geometry(f"+{x}+{ny}")
+            self._drop_job = self.root.after(16, step)
+
+        step()
+
     def _on_press(self, e):
+        self._cancel_long_press()
         self._drag = (e.x_root, e.y_root,
                       self.root.winfo_x(), self.root.winfo_y())
         self._moved = False
+        self.grabbed = False
+        self._shake = []
+        self._press_at = time.time()
+        self._long_press_job = self.root.after(LONG_PRESS_MS, self._long_press_fired)
 
     def _on_drag(self, e):
         if not self._drag:
@@ -2207,24 +2679,68 @@ class PetApp:
         sx, sy, wx, wy = self._drag
         dx, dy = e.x_root - sx, e.y_root - sy
         if abs(dx) > 3 or abs(dy) > 3:
-            if not self._moved and self.companion is not None:
-                self.companion.touch("drag")             # 拖动也记一笔
+            if not self._moved:
+                self._cancel_long_press()                # 动了就不算长按
+                if self.companion is not None:
+                    self.companion.touch("drag")         # 拖动也记一笔
             self._moved = True
+        # 甩动检测：记最近几次水平方向，来回换够多次就算甩
+        now = time.time()
+        self._shake = [(t, d) for t, d in self._shake if now - t < SHAKE_WINDOW]
+        if abs(dx) > 12:
+            self._shake.append((now, 1 if dx > 0 else -1))
+        dirs = [d for _, d in self._shake]
+        flips = sum(1 for a, b in zip(dirs, dirs[1:]) if a != b)
+        if flips >= SHAKE_DIRS:
+            self._shake = []
+            self.dizzy_until = now + SHAKE_DIZZY_S
+            self.poke_until = 0.0
         self.root.geometry(f"+{wx + dx}+{wy + dy}")
 
     def _on_release(self, e):
+        was_grab = self.grabbed
+        self._cancel_long_press()
         self._drag = None
+        if was_grab:
+            self._drop()                                 # 抱起来后松手 → 掉下去
+            return
         if not self._moved:
+            now = time.time()
             # 单击 = 戳一下：播一次反应动画（皮肤没提供就只切详情卡）
             durs = self.reaction_durs.get("poke") or []
             if durs:
-                self.poke_until = time.time() + sum(durs) / 1000.0
+                self.poke_until = now + sum(durs) / 1000.0
             # 陪伴模式记一笔：亲密度和精力都会涨，睡着的话会醒
             if self.companion is not None:
                 self.companion.touch("poke")
-                if self.in_companion and random.random() < 0.3:
-                    self.companion.say(random.choice(PET_LINES))
+                # 连着摸太多次她会烦
+                if now - self.pet_streak_at > ANNOY_WINDOW:
+                    self.pet_streak = 0
+                self.pet_streak_at = now
+                self.pet_streak += 1
+                if self.pet_streak >= ANNOY_AFTER:
+                    self.annoyed_until = now + ANNOY_S
+                    self.pet_streak = 0
+                    self.companion.say(random.choice(ANNOY_LINES), 2.4)
+                else:
+                    self.petted_until = now + 1.8
+                    if self.in_companion and random.random() < 0.3:
+                        self.companion.say(random.choice(PET_LINES))
             self._toggle_detail()
+        else:
+            # 拖到屏幕边缘附近 —— 她会抓住不放
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            vx, vy, vw, vh = virtual_screen()
+            edge = None
+            if x <= vx + EDGE_SNAP:
+                edge, x = "left", vx
+            elif x + self.win_w >= vx + vw - EDGE_SNAP:
+                edge, x = "right", vx + vw - self.win_w
+            elif y <= vy + EDGE_SNAP:
+                edge, y = "top", vy
+            self.grab_edge = edge
+            if edge is not None:
+                self.root.geometry(f"+{x}+{y}")
         self._save_config()
 
     def _feed(self):
@@ -2266,6 +2782,11 @@ class PetApp:
         self._save_config()
         if self.companion is not None:
             self.companion.save()                        # 记下这一程
+        if getattr(self, "hotkeys", None) is not None:
+            try:
+                self.hotkeys.stop()
+            except Exception:                            # noqa: BLE001
+                pass
         try:
             self.root.destroy()
         except Exception:                                # noqa: BLE001
@@ -2285,6 +2806,16 @@ class PetApp:
             elif self.args.force_state:
                 self.snap = self._demo_snapshot(self.args.force_state)
             elif self.watcher:
+                # 全局鼠标位置：她要看的是整个桌面上的鼠标，不只是窗口内的
+                cx, cy = cursor_pos()
+                if (cx, cy) != self._cursor_prev:
+                    self._cursor_prev = (cx, cy)
+                    self._cursor_at = time.time()
+                if self.companion is not None:
+                    self.companion.mouse_x = cx
+                    self.companion.mouse_at = self._cursor_at
+                    self.companion.pet_x = self.root.winfo_x()
+
                 snap = self.watcher.poll()
                 if self.watcher._new_completion:          # 有任务刚跑完
                     self.watcher._new_completion = False
@@ -2299,6 +2830,14 @@ class PetApp:
                     if self.companion is not None:
                         self.companion.wake()
                 self.snap = snap
+                # 溜达：把窗口朝目标位置挪一点。拖动中不抢方向盘。
+                if (self.in_companion and self.snap.wander and self._drag is None
+                        and getattr(self, "_drop_job", None) is None):
+                    target = int(self.snap.wander)
+                    wx = self.root.winfo_x()
+                    if abs(wx - target) > WANDER_STEP:
+                        wx += WANDER_STEP if target > wx else -WANDER_STEP
+                        self.root.geometry(f"+{wx}+{self.root.winfo_y()}")
         except Exception as exc:                         # noqa: BLE001
             print(f"[warn] poll: {exc}", file=sys.stderr)
         self.root.after(POLL_MS, self._poll)
@@ -2365,6 +2904,16 @@ class PetApp:
             self.snap.phase = t / loop
             self.frame_i += 1
 
+            # 交互装饰画在所有皮肤之上 —— 契约/clawd 的帧是预渲染的，
+            # 画在 render_pet 里就只有内置皮肤能用了。
+            ov_kind = self._overlay_kind(now)
+            if ov_kind:
+                ov = overlay_for(ov_kind, self.snap.phase)
+                if ov is not None:
+                    sprite = Image.alpha_composite(sprite, ov)
+            if self.snap.mirror:                         # 看向左边：水平翻转
+                sprite = ImageOps.mirror(sprite)
+
             card_key = (st, self.snap.detail_line, self.snap.idle_hint, self.detail,
                         self.privacy,
                         self.snap.tool_names and tuple(self.snap.tool_names),
@@ -2379,6 +2928,8 @@ class PetApp:
             canvas = Image.new("RGBA", (WIN_W, WIN_H), (0, 0, 0, 0))
             canvas.alpha_composite(sprite, (0, 0))
             canvas.alpha_composite(card, (0, PET_AREA_H))
+            if self.scale != 1.0:                        # 滚轮缩放：整幅一起缩
+                canvas = canvas.resize((self.win_w, self.win_h), Image.LANCZOS)
             self.display.push(canvas)
             self._tray_sync()
         except Exception as exc:                         # noqa: BLE001
@@ -2476,6 +3027,8 @@ def main() -> int:
     ap.add_argument("--privacy", action="store_true", help="隐私模式渲染")
     ap.add_argument("--no-companion", action="store_true",
                     help="关掉陪伴模式（DSH 没任务时就显示空闲，不自己过日子）")
+    ap.add_argument("--no-hotkeys", action="store_true",
+                    help="不注册全局热键（Ctrl+Alt+P 显示隐藏 / +F 喂食 / +S 设置）")
     args = ap.parse_args()
 
     if args.list_skins:
