@@ -105,15 +105,36 @@
           }
         }, [])
 
+        /**
+         * 点击开关。
+         *
+         * 关键：**不能拿本组件里的 `running` 决定开还是关**。那个值来自 3 秒一次的
+         * 轮询，可能是陈旧的 —— 一旦它还停在 true，第二次点击会再发一次 on=0，
+         * 而 Host 的 stop() 在 handle 已为 null 时是空操作，表现就是「怎么点都没反应」。
+         * 所以先取一次最新状态，再据此决定动作。
+         */
         function toggle() {
           if (busy) return
           setBusy(true)
-          fetch('/dsh-pet/toggle?on=' + (running ? '0' : '1'), {
-            method: 'POST',
-            credentials: 'include',
-          })
+          report('click', JSON.stringify({ localRunning: running, busy: busy }))
+
+          fetch('/dsh-pet/status', { cache: 'no-store', credentials: 'include' })
+            .then(function (r) { return r.ok ? r.json() : null })
+            .then(function (fresh) {
+              // 取不到就用本地值兜底，总比不发好
+              var nowRunning = fresh ? !!fresh.running : running
+              var on = nowRunning ? '0' : '1'
+              report('toggle-decided', JSON.stringify({
+                fresh: fresh ? fresh.running : null, local: running, send: 'on=' + on,
+              }))
+              return fetch('/dsh-pet/toggle?on=' + on, {
+                method: 'POST',
+                credentials: 'include',
+              })
+            })
             .then(function (r) { return r.ok ? r.json() : null })
             .then(function (d) {
+              report('toggle-response', JSON.stringify(d))
               if (d) {
                 setRunning(!!d.running)
                 setError(d.error || '')
