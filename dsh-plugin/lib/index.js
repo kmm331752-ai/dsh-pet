@@ -38,23 +38,49 @@ export function apply(ctx, config) {
   let handle = null
   /** 最近一次失败原因，供按钮提示。 */
   let lastError = null
+  /**
+   * 正在退出中的上一只进程。
+   *
+   * 桌宠用「绑端口 51937」做单实例锁，而进程收到终止信号后端口大约还要
+   * **2 秒**才真正释放。这期间 spawn 起来的新实例会 bind 失败并立刻退出 ——
+   * 表现就是连点两下之后「怎么点都没反应」。所以 stop 记下 done，
+   * start 必须先等它落地。
+   */
+  let stopping = null
 
   const status = () => ({ running: handle !== null, error: lastError })
 
-  /** 启动桌宠；已在运行则原样返回。 */
-  const start = () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  /** 启动桌宠；已在运行则原样返回。会先等上一只完全退出。 */
+  const start = async () => {
     if (handle !== null) return status()
+    if (stopping !== null) {
+      try {
+        await stopping
+      } catch { /* 上一只怎么退的不重要，只要它退干净了 */ }
+      stopping = null
+      // done 落地就代表进程没了，端口理论上已释放；留一点余量更稳
+      await sleep(300)
+    }
+    if (handle !== null) return status()          // 等待期间可能已经被别人拉起
     try {
-      handle = ctx.subprocess.spawn({
+      const spawned = ctx.subprocess.spawn({
         argv: [pythonPath, scriptPath],
         cwd: petDir,
         // 桌宠自带 GUI，不需要任何标准流；inherit 会让它跟着宿主控制台
         stdio: { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' },
         graceMs: 4000,
       })
-      const spawned = handle
+      handle = spawned
+      const startedAt = Date.now()
       const forget = () => {
-        if (handle === spawned) handle = null
+        if (handle !== spawned) return
+        handle = null
+        // 起来不到 3 秒就退出，基本就是撞上单实例锁了（桌宠现在会非零退出）
+        if (Date.now() - startedAt < 3000 && lastError === null) {
+          lastError = '桌宠启动后立即退出：单实例锁端口仍被上一只占用，稍后再试'
+        }
       }
       // 用户从桌宠右键退出时，这里也要跟着复位
       spawned.done.then(forget, forget)
@@ -68,13 +94,14 @@ export function apply(ctx, config) {
     return status()
   }
 
-  /** 终止桌宠。 */
+  /** 终止桌宠。立刻返回，但把退出 promise 留给下一次 start 等。 */
   const stop = () => {
     if (handle === null) return status()
     const running = handle
     handle = null
     try {
       running.terminate()
+      stopping = running.done.catch(() => {})
       console.log('[dsh-pet] 已停止')
     } catch (err) {
       lastError = String((err && err.message) || err)
@@ -104,7 +131,16 @@ export function apply(ctx, config) {
     path: '/dsh-pet/toggle',
     handler: (req, res) => {
       const on = /[?&]on=1/.test(req.url || '')
-      sendJson(res, on ? start() : stop())
+      // start() 是异步的（要先等上一只退出），stop() 是同步的
+      const result = on ? start() : stop()
+      if (result !== null && typeof result.then === 'function') {
+        result.then(
+          (snap) => sendJson(res, snap),
+          (err) => sendJson(res, { running: false, error: String((err && err.message) || err) }),
+        )
+        return
+      }
+      sendJson(res, result)
     },
   }))
 
@@ -326,7 +362,9 @@ export function apply(ctx, config) {
 
   // 随 DSH 启动：这个插件是 profile 补丁里的一行，DSH 一起来 apply 就跑。
   // 桌宠自带单实例锁，所以重复启动不会叠出第二只。
-  if (cfg.autostart !== false) start()
+  if (cfg.autostart !== false) {
+    start().catch((err) => console.error('[dsh-pet] 自动启动失败:', err))
+  }
 
   console.log('[dsh-pet] 路由已注册: /dsh-pet/status, /dsh-pet/toggle, '
     + '/dsh-pet/debug-boot, /dsh-pet/client-log')

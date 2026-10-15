@@ -2494,13 +2494,18 @@ def main() -> int:
     # 单实例锁：绑一个本地端口，进程活着就占着，退出时系统自动释放。
     # 比 PID 文件干净 —— 崩溃也不会留下需要手动清的残留。
     # 插件、快捷方式、手动启动都走这里，所以不会叠出第二只桌宠。
+    #
+    # 注意：进程收到终止信号后，端口大约还要 2 秒才真正释放。这期间起来的
+    # 新实例会 bind 失败 —— 所以这里必须【报错并非零退出】，不能静默 return 0，
+    # 否则调用方（DSH 插件）分不清「已经在跑」和「起来又死了」。
     lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         lock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
         lock.listen(1)
-    except OSError:
-        print("桌宠已在运行，本次启动忽略。")
-        return 0
+    except OSError as exc:
+        print(f"桌宠启动失败：单实例锁端口 {SINGLE_INSTANCE_PORT} 被占用"
+              f"（上一只可能还在退出中，等两秒再试）。{exc}", file=sys.stderr)
+        return 2
 
     PetApp(args).run()
     return 0
