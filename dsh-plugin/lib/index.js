@@ -15,6 +15,8 @@
  *   scriptPath  可选，默认 <petDir>/dsh_pet.py
  */
 
+import { createRequire } from 'node:module'
+
 /** Cordis 插件名。 */
 export const name = 'dsh-pet-toggle'
 
@@ -106,38 +108,120 @@ export function apply(ctx, config) {
     },
   }))
 
-  // 诊断：把客户端模块图（__DSH_BOOT__ 的来源）读出来，确认本包有没有进图。
-  // 客户端按钮不显示时，第一个要排除的就是「包没被扫进启动图」。
+  // 诊断：客户端按钮不显示时，第一个要排除的是「包没被扫进启动图」。
+  //
+  // 前端的插件启动**不用 Host 的条目树**，而是遍历 __DSH_BOOT__.plugins：
+  //     const s = this.manifest.plugins.map(a => a.id)
+  //     await Promise.all(s.map(async a => i.create({ name: a })))
+  // 所以 manifest 里没有的包根本不会被创建成客户端条目 —— 按钮自然不出现。
+  //
+  // manifest 由 dsh-client-modules 的 ClientModuleRegistry 组合而来，而它
+  // 在 resolveMeta() 定位不到包时会**静默返回 null**（还把这个失败结果缓存起来），
+  // 宿主日志里什么都看不到。这条路由就是把这层黑盒打开：
+  //   GET /dsh-pet/debug-boot          只诊断
+  //   GET /dsh-pet/debug-boot?fix=1    诊断 + 清掉负缓存并重新组合
+  const findClientModules = () => {
+    // 服务名是 clientModules（dsh-client-modules 里 super(ctx, "clientModules")）。
+    // 它可能挂在 root 上而不是本插件的作用域里，所以几条路都试一遍。
+    const tries = [
+      () => ctx.get('clientModules'),
+      () => ctx.root?.get?.('clientModules'),
+      () => ctx.reflect?.get?.('clientModules'),
+      () => ctx.root?.reflect?.get?.('clientModules'),
+    ]
+    for (const t of tries) {
+      try {
+        const v = t()
+        if (v !== undefined && v !== null) return v
+      } catch { /* 换下一条路 */ }
+    }
+    return undefined
+  }
+
+  const safe = (fn) => {
+    try { return { ok: true, value: fn() } } catch (err) { return { ok: false, error: String((err && err.message) || err) } }
+  }
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/dsh-pet/debug-boot',
-    handler: (_req, res) => {
-      const wp = ctx.get('webPlugins')
-      const info = { hasService: wp !== undefined, hasGraph: false, keys: [], ids: [], petIds: [] }
-      if (wp && typeof wp.graph === 'function') {
-        try {
-          const g = wp.graph()
-          info.hasGraph = true
-          info.keys = Object.keys(g || {})
-          const ids = []
-          const walk = (v, depth) => {
-            if (depth > 5 || v === null || typeof v !== 'object') return
-            if (Array.isArray(v)) {
-              for (const x of v) walk(x, depth + 1)
-              return
-            }
-            if (typeof v.id === 'string') ids.push(v.id)
-            if (typeof v.name === 'string' && typeof v.kind === 'string') ids.push(v.name)
-            for (const k of Object.keys(v)) walk(v[k], depth + 1)
-          }
-          walk(g, 0)
-          info.ids = [...new Set(ids)]
-          info.petIds = info.ids.filter((x) => /pet/i.test(x))
-        } catch (err) {
-          info.error = String((err && err.message) || err)
-        }
+    handler: (req, res) => {
+      const out = {}
+      const cm = findClientModules()
+      out.hasService = cm !== undefined
+      if (cm === undefined) {
+        out.hint = '拿不到 clientModules 服务，下面列出本插件能看到的服务名'
+        out.visibleServices = safe(() => Object.keys(ctx.root ?? {}).filter((k) => !k.startsWith('_')).slice(0, 120)).value ?? []
+        return sendJson(res, out)
       }
-      sendJson(res, info)
+
+      // ── 1. 找我的条目，以及它所属树的 baseUrl ──
+      const entries = safe(() => [...ctx.loader.entries()]).value ?? []
+      out.entryCount = entries.length
+      const mine = entries.filter((e) => /pet/i.test(e.options?.name ?? ''))
+      out.mine = mine.map((e) => ({
+        name: e.options?.name,
+        id: e.options?.id,
+        disabled: e.disabled === true,
+        fiberState: e.fiber?.state ?? null,
+        baseUrl: e.parent?.tree?.ctx?.baseUrl ?? null,
+      }))
+
+      const e0 = mine[0]
+      if (e0 !== undefined) {
+        const loaderName = e0.options.name
+        const baseUrl = e0.parent?.tree?.ctx?.baseUrl
+        out.loaderName = loaderName
+        out.baseUrl = baseUrl
+
+        // ── 2. 逐步复现 ClientModuleRegistry 的定位过程 ──
+        out.locatePkgJson = safe(() => cm.locatePkgJson(loaderName, baseUrl))
+        out.sourceKey = safe(() => cm.sourceKey(loaderName, baseUrl)).value ?? null
+        out.pkgMetaCached = safe(() => {
+          const m = cm.pkgMeta
+          if (m === undefined) return 'no pkgMeta property'
+          const hit = m.get(out.sourceKey)
+          return hit === undefined ? 'not cached' : hit
+        }).value
+        out.resolveSource = safe(() => cm.resolveSource(e0))
+        out.resolveMeta = safe(() => cm.resolveMeta(loaderName, baseUrl))
+
+        // ── 3. loader 的 ESM 解析接口（locatePkgJson 走的就是这条） ──
+        const internal = ctx.loader.internal
+        out.loaderInternal = {
+          present: internal !== undefined,
+          version: internal?.version ?? null,
+          hasResolveSync: typeof internal?.resolveSync === 'function',
+        }
+        if (typeof internal?.resolveSync === 'function' && baseUrl !== undefined) {
+          out.manualResolve = safe(() => (internal.version === 'v2'
+            ? internal.resolveSync(baseUrl, { specifier: loaderName, attributes: {} })
+            : internal.resolveSync(loaderName, baseUrl, {})))
+        }
+        // 退路：Node 自己的解析（internal 不可用时 locatePkgJson 用的就是它）
+        out.requireResolve = safe(() => createRequire(baseUrl).resolve(`${loaderName}/package.json`))
+      }
+
+      // ── 4. 组合出来的图（__DSH_BOOT__ 的来源） ──
+      out.graph = safe(() => {
+        const g = cm.graph()
+        return { keys: Object.keys(g ?? {}), plugins: (g?.plugins ?? []).map((p) => p.id ?? p) }
+      })
+
+      // ── 5. fix=1：清掉负缓存并强制重新组合 ──
+      if (/[?&]fix=1/.test(req.url || '')) {
+        const before = JSON.stringify(out.graph?.value?.plugins ?? [])
+        out.fix = safe(() => {
+          const cleared = cm.pkgMeta?.clear !== undefined
+          if (cleared) cm.pkgMeta.clear()
+          const errs = []
+          cm.flush((err) => errs.push(String((err && err.message) || err)))
+          const after = (cm.graph()?.plugins ?? []).map((p) => p.id ?? p)
+          return { clearedCache: cleared, flushErrors: errs, after, changed: JSON.stringify(after) !== before }
+        })
+      }
+
+      sendJson(res, out)
     },
   }))
 
