@@ -26,9 +26,12 @@ import time
 import tkinter as tk
 
 from PIL import Image, ImageDraw
+from PIL import ImageTk                              # 皮肤预览要用
 
 from pet_base import *
 from pet_render import *
+# 下划线开头的名字 import * 带不出来，要显式引（这个坑踩过好几次了）
+from pet_render import _fmt_ms
 from pet_sources import *          # 也带出 Mood
 from pet_system import *
 from pet_types import Snapshot, TaskInfo
@@ -280,6 +283,7 @@ class PetApp:
         self.menu.add_command(label=t("设置…"), command=self._open_settings)
         self.menu.add_command(label=t("和大肥鱼说话…"), command=self._open_chat)
         self.menu.add_command(label=t("导出相处记录…"), command=self._export_record)
+        self.menu.add_command(label=t("导出周报…"), command=self._export_week)
         self.menu.add_command(label=t("检查更新…"), command=self._check_update_async)
         self.menu.add_command(label=t("退出"), command=self._quit)
 
@@ -297,6 +301,7 @@ class PetApp:
                 label=s["display"], value=s["id"], variable=self.var_skin,
                 command=lambda sid=s["id"]: self._switch_skin(sid))
         self._skin_menu.add_separator()
+        self._skin_menu.add_command(label=t("预览…"), command=self._open_skin_preview)
         self._skin_menu.add_command(label=t("从链接安装…"), command=self._install_skin_dialog)
         self._skin_menu.add_command(label=t("删除皮肤…"), command=self._remove_skin_dialog)
 
@@ -872,6 +877,308 @@ class PetApp:
         except Exception as exc:                         # noqa: BLE001
             log_error("导出相处记录失败", exc)
 
+    # -- 皮肤预览 -----------------------------------------------------------
+    def _skin_thumb(self, skin_id: str, size: int = 96):
+        """把一套皮肤的待机帧缩成缩略图。
+
+        失败返回 None —— 一套皮肤加载不了不该让整个预览窗口打不开。
+        """
+        try:
+            skin = load_skin(skin_id)
+            frames = skin.frames("idle")
+            if not frames:
+                return None
+            img = frames[0][0]
+            # 按角色本体裁掉空白，不然缩略图里人很小
+            box = pet_accessories.character_box(img)
+            if box:
+                pad = 6
+                box = (max(0, box[0] - pad), max(0, box[1] - pad),
+                       min(img.width, box[2] + pad), min(img.height, box[3] + pad))
+                img = img.crop(box)
+            img = img.copy()
+            img.thumbnail((size, size), Image.LANCZOS)
+            return img
+        except Exception as exc:                         # noqa: BLE001
+            log_error(f"生成皮肤缩略图失败：{skin_id}", exc)
+            return None
+
+    def _open_skin_preview(self) -> None:
+        """所有皮肤排一排，点一下直接切 —— 不用一个个试。"""
+        tk = self.tk
+        if getattr(self, "_preview_win", None) is not None:
+            try:
+                self._preview_win.destroy()
+            except Exception:                            # noqa: BLE001
+                pass
+        win = tk.Toplevel(self.root)
+        self._preview_win = win
+        win.title(t("皮肤预览"))
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+
+        tk.Label(win, text=t("点一下直接换"), anchor="w", fg="#888").pack(
+            fill="x", padx=12, pady=(10, 4))
+
+        grid = tk.Frame(win)
+        grid.pack(padx=12, pady=(0, 8))
+        skins = discover_skins()
+        self._preview_imgs = []                          # 必须留引用，否则被 GC 掉
+        cols = 3
+        for i, s in enumerate(skins):
+            cell = tk.Frame(grid, bd=1, relief="solid" if s["id"] == self.skin.name
+                            else "flat")
+            cell.grid(row=i // cols, column=i % cols, padx=4, pady=4)
+            thumb = self._skin_thumb(s["id"])
+            if thumb is not None:
+                photo = ImageTk.PhotoImage(thumb)
+                self._preview_imgs.append(photo)
+                tk.Button(cell, image=photo, relief="flat",
+                          command=lambda sid=s["id"]: self._pick_skin(sid, win)).pack()
+            else:
+                tk.Button(cell, text="?", width=8, height=4,
+                          command=lambda sid=s["id"]: self._pick_skin(sid, win)).pack()
+            tk.Label(cell, text=s["display"][:14], font=("Microsoft YaHei UI", 8)).pack()
+
+        tk.Button(win, text=t("关闭"),
+                  command=lambda: (win.destroy(),
+                                   setattr(self, "_preview_win", None))).pack(
+            pady=(0, 12))
+
+    def _pick_skin(self, skin_id: str, win) -> None:
+        self._switch_skin(skin_id)
+        self._rebuild_skin_menu()
+        try:
+            win.destroy()
+        except Exception:                                # noqa: BLE001
+            pass
+        self._preview_win = None
+
+    # -- 会话操作 -----------------------------------------------------------
+    def _open_session_actions(self) -> None:
+        """点信息卡弹出来的窗口：对当前会话能做点什么。
+
+        **说明白一件事**：DSH 没有「切到指定会话」的接口 —— 它的 Web GUI
+        是个 SPA（没有服务端会话路由），CLI 只能启动 profile。
+        所以这里给的是能做的：打开日志所在目录、复制 ID、复制摘要、
+        把 DSH 窗口切到前台。最后一项配合复制的 ID，能凑出「跳过去」的效果，
+        但不是一键直达。
+        """
+        tk = self.tk
+        tasks = list(self.snap.tasks) or ([P.TaskInfo(
+            session_id=self.snap.session_id, state=self.snap.state,
+            title=self.snap.title, tool_names=list(self.snap.tool_names or []))]
+            if self.snap.session_id or self.snap.title else [])
+
+        if getattr(self, "_sess_win", None) is not None:
+            try:
+                self._sess_win.destroy()
+            except Exception:                            # noqa: BLE001
+                pass
+        win = tk.Toplevel(self.root)
+        self._sess_win = win
+        win.title(t("会话"))
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+
+        status = tk.Label(win, text="", anchor="w", fg="#2E9E63", wraplength=380,
+                          justify="left")
+        status.pack(fill="x", padx=12, pady=(10, 4))
+
+        if not tasks:
+            tk.Label(win, text=t("现在没有活跃会话"), anchor="w").pack(
+                fill="x", padx=12, pady=(0, 8))
+        for idx, task in enumerate(tasks[:6]):
+            row = tk.Frame(win)
+            row.pack(fill="x", padx=12, pady=3)
+            label = task.title or task.session_id[:12] or t("未命名会话")
+            tk.Label(row, text=f"{idx + 1}. {label[:26]}", anchor="w",
+                     width=24).pack(side="left")
+            tk.Button(row, text=t("打开日志"),
+                      command=lambda x=task: self._open_session_log(x)).pack(side="left")
+            tk.Button(row, text=t("复制 ID"),
+                      command=lambda x=task: self._copy_text(
+                          x.session_id, t("已复制会话 ID"))).pack(side="left", padx=3)
+            tk.Button(row, text=t("复制摘要"),
+                      command=lambda x=task: self._copy_text(
+                          self._session_summary(x), t("已复制摘要"))).pack(side="left")
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=12, pady=(8, 12))
+        tk.Button(bar, text=t("把 DSH 切到前台"),
+                  command=lambda: self._focus_dsh(status)).pack(side="left")
+        tk.Button(bar, text=t("关闭"),
+                  command=lambda: (win.destroy(),
+                                   setattr(self, "_sess_win", None))).pack(side="right")
+
+        # 写成**单个**字符串字面量，不要用相邻字面量拼接 ——
+        # 翻译表是以中文原文为 key 的，拼接会让源码里的文本和 key 对不上，
+        # 有条测试专门查这个（踩过）。
+        tk.Label(win, text=t("DSH 没有「直接跳到某个会话」的接口，"
+                             "复制 ID 后在 DSH 里搜，或打开日志目录看原始记录。"),
+                 anchor="w", fg="#888", justify="left", wraplength=380).pack(
+            fill="x", padx=12, pady=(0, 10))
+
+    def _session_summary(self, task) -> str:
+        bits = [task.title or t("未命名会话")]
+        label = PALETTE.get(task.state, {}).get("label")
+        if label:
+            bits.append(t(label))
+        if task.elapsed_ms:
+            bits.append(_fmt_ms(task.elapsed_ms))
+        if task.session_id:
+            bits.append(task.session_id)
+        return " · ".join(bits)
+
+    def _copy_text(self, text: str, note: str) -> None:
+        """复制到剪贴板。失败就告诉她一声，别静默。"""
+        if not text:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update_idletasks()
+            w = getattr(self, "_sess_win", None)
+            if w is not None:
+                for child in w.winfo_children():
+                    if child.winfo_class() == "Label" and child.cget("wraplength") == 380:
+                        child.configure(text=note)
+                        break
+        except Exception as exc:                         # noqa: BLE001
+            log_error("复制到剪贴板失败", exc)
+
+    def _open_session_log(self, task) -> None:
+        """在资源管理器里定位这个会话的日志文件。"""
+        try:
+            path = find_log_path(task.session_id) if task.session_id else None
+            if path and os.path.exists(path):
+                # /select 会打开目录并选中文件
+                os.startfile(os.path.dirname(path))      # noqa: S606
+                return
+            # 找不到具体文件就打开会话根目录
+            root_dir = SESS_DIR
+            if os.path.isdir(root_dir):
+                os.startfile(root_dir)                   # noqa: S606
+                return
+            log_error("打开会话目录失败", FileNotFoundError(root_dir))
+        except Exception as exc:                         # noqa: BLE001
+            log_error("打开会话目录失败", exc)
+
+    def _focus_dsh(self, status_label=None) -> None:
+        """把 DSH 主窗口切到前台。
+
+        桌宠是 topmost 的无边框窗口，DSH 被压在下面时用户找不到 ——
+        这个按钮把 DSH 提到前面。找不到窗口就说一声。
+        """
+        try:
+            user32 = ctypes.windll.user32
+            found = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def cb(hwnd, _lp):
+                n = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(hwnd, n, 256)
+                title = n.value or ""
+                if "DeepSeek" in title or "Harness" in title:
+                    if user32.IsWindowVisible(hwnd):
+                        found.append((hwnd, title))
+                return True
+
+            user32.EnumWindows(cb, 0)
+            if not found:
+                if status_label is not None:
+                    status_label.configure(text=t("没找到 DSH 窗口"), fg="#C97A22")
+                return
+            hwnd, _title = found[0]
+            user32.ShowWindow(hwnd, 9)                   # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            if status_label is not None:
+                status_label.configure(text=t("DSH 已切到前台"), fg="#2E9E63")
+        except Exception as exc:                         # noqa: BLE001
+            log_error("切换 DSH 窗口失败", exc)
+            if status_label is not None:
+                status_label.configure(text=t("切不过去"), fg="#B93B37")
+
+    def _export_week(self) -> None:
+        """把最近 7 天的任务统计画成一张图。
+
+        数据来自 Mood.history —— 每次任务完成/失败、每轮看到工具耗时都会记。
+        没有数据也画，只是会说明"这周还没干什么"。
+        """
+        m = self.companion.mood if self.companion else Mood()
+        st = m.week_stats()
+        W, H = 460, 340
+        img = Image.new("RGBA", (W, H), (26, 29, 38, 255))
+        d = ImageDraw.Draw(img)
+        try:
+            f_big = load_font(22, bold=True)
+            f_mid = load_font(14)
+            f_small = load_font(12)
+        except Exception:                                # noqa: BLE001
+            f_big = f_mid = f_small = None
+
+        d.rounded_rectangle([10, 10, W - 10, H - 10], radius=14,
+                            outline=(70, 78, 96, 255), width=2)
+        d.text((28, 24), t("这周"), font=f_big, fill=(240, 243, 248, 255))
+        d.text((28, 56),
+               f"{t('跑了')} {st['done']} {t('个任务')}"
+               + (f" · {t('失败')} {st['failed']}" if st["failed"] else ""),
+               font=f_mid, fill=(150, 200, 255, 255))
+
+        # 七天的柱状图
+        base_y = 150
+        maxv = max([d_["done"] for d_ in st["days"]] + [1])
+        bw, gap = 34, 12
+        x0 = 30
+        for i, day in enumerate(st["days"]):
+            x = x0 + i * (bw + gap)
+            hgt = int(70 * day["done"] / maxv)
+            col = (95, 201, 139, 255) if day["done"] else (58, 62, 74, 255)
+            d.rounded_rectangle([x, base_y - hgt, x + bw, base_y],
+                                radius=3, fill=col)
+            fh = 0
+            if day["failed"]:
+                fh = max(3, int(70 * day["failed"] / maxv))
+                d.rounded_rectangle([x, base_y - hgt - fh - 2, x + bw,
+                                     base_y - hgt - 2], radius=2,
+                                    fill=(185, 59, 55, 255))
+            if day["done"]:
+                # 数字要画在**失败段之上** —— 画在 done 段顶上会和红块叠在一起
+                d.text((x + 4, base_y - hgt - fh - 16), str(day["done"]),
+                       font=f_small, fill=(220, 226, 236, 255))
+            # 星期几
+            try:
+                wd = time.strftime("%a", time.strptime(day["day"], "%Y-%m-%d"))
+            except Exception:                            # noqa: BLE001
+                wd = day["day"][-2:]
+            d.text((x + 6, base_y + 4), wd, font=f_small, fill=(140, 148, 164, 255))
+        d.line([(x0 - 6, base_y), (W - 26, base_y)], fill=(72, 78, 92, 255), width=1)
+
+        y = base_y + 30
+        if st["slowest"]:
+            d.text((28, y), t("最慢的工具"), font=f_mid, fill=(152, 160, 176, 255))
+            y += 20
+            for name, ms in st["slowest"][:4]:
+                label = str(name)[:20]
+                d.text((36, y), label, font=f_small, fill=(240, 243, 248, 255))
+                v = f"{ms / 1000:.1f}s" if ms >= 1000 else f"{ms:.0f}ms"
+                vw = d.textlength(v, font=f_small)
+                d.text((W - 36 - vw, y), v, font=f_small, fill=(242, 166, 90, 255))
+                y += 17
+        elif not st["done"]:
+            d.text((28, y), t("这周还没干什么，下周加油"), font=f_mid,
+                   fill=(152, 160, 176, 255))
+            y += 22
+
+        d.text((28, H - 34), t("DSH 桌宠"), font=f_small, fill=(110, 118, 134, 255))
+        out = week_path()
+        try:
+            img.convert("RGB").save(out)
+            print(f"[export] 周报 -> {out}")
+            self._say(t("写好啦"), 2.5)
+        except Exception as exc:                         # noqa: BLE001
+            log_error("导出周报失败", exc)
+
     # -- 本地对话 -----------------------------------------------------------
     def _set_chat_status(self, text: str, color: str = "#666") -> None:
         """把「测试连接」的结果写到设置窗口那行状态上。窗口关了就算了。"""
@@ -1231,6 +1538,11 @@ class PetApp:
             self._drop()                                 # 抱起来后松手 → 掉下去
             return
         if not self._moved:
+            # 点**信息卡**（下半部分）= 会话操作；点角色 = 摸她。
+            # 分开是因为这两件事的意图完全不同，混在一个动作里两边都不好用。
+            if e.y >= PET_AREA_H:
+                self._open_session_actions()
+                return
             now = time.time()
             # 单击 = 戳一下：播一次反应动画（皮肤没提供就只切详情卡）
             durs = self.reaction_durs.get("poke") or []
@@ -1347,10 +1659,21 @@ class PetApp:
                 if self.watcher._new_completion:          # 有任务刚跑完
                     self.watcher._new_completion = False
                     self._play_sound("done")
+                    # 记进周报统计
+                    if self.companion is not None:
+                        self.companion.mood.note_completion(ok=True)
+                        self.companion.save()
                 # 出错也响一声 —— 但不是"完成"那个音，免得听混
                 if snap.state == "failed" and self._last_state != "failed":
                     self._play_sound("failed")
+                    if self.companion is not None:
+                        self.companion.mood.note_completion(ok=False)
+                        self.companion.save()
                 self._last_state = snap.state
+                # 工具耗时也记一笔（周报里排最慢的工具）
+                if self.companion is not None and snap.slow_tools:
+                    for _name, _ms in snap.slow_tools:
+                        self.companion.mood.note_tool(_name, _ms)
                 # 喂作息统计：DSH 有活在跑就说明你在。她据此学到你几点在、几点不在，
                 # 而不是死按 23:00~07:00 判断夜晚（夜班的人凌晨也在）。
                 if self.companion is not None:

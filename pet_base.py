@@ -104,6 +104,11 @@ def record_path() -> str:
     return os.path.join(data_dir(), "相处记录.png")
 
 
+def week_path() -> str:
+    """导出的周报图。"""
+    return os.path.join(data_dir(), "周报.png")
+
+
 def sounds_dir() -> str:
     """自定义音效包目录。放 <事件>.wav 就会盖掉系统音。"""
     return os.path.join(data_dir(), "sounds")

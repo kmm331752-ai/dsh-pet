@@ -922,12 +922,17 @@ class TestI18n(unittest.TestCase):
 
     @staticmethod
     def _flat(text: str) -> str:
-        """比对用：去掉所有空白，并把源码里的 \\n 转义也当空白去掉。
+        """比对用：去掉空白、换行转义和引号。
 
-        源码里写的是 "...\\n滚轮..."（字面量反斜杠 n），而翻译表的 key 里
-        是**真的换行**。不归一的话两边永远对不上。
+        要处理的三种写法差异：
+          · 源码里是 `\\n`（字面量反斜杠 n），翻译表的 key 里是**真换行**
+          · 长字符串常写成相邻字面量拼接，源码里两个引号中间夹着空白
+          · 排版换行
+
+        归一之后只比"文字内容"，不比怎么写的。第一版只去了空白，
+        于是所有相邻字面量拼接的句子都被报成"孤儿 key"。
         """
-        return re.sub(r"\s+", "", text.replace("\\n", ""))
+        return re.sub(r'[\s"\'\\]+', "", text.replace("\\n", ""))
 
     def test_every_translation_key_exists_in_source(self):
         """翻译表里的 key 必须在源码里出现 —— 否则是改文案时留下的孤儿。
@@ -1141,6 +1146,123 @@ class TestAccessoryRendering(unittest.TestCase):
             if ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox():
                 dirty.append(i)
         self.assertEqual(dirty, [], f"换了几轮配饰后缓存被污染：帧 {dirty}")
+
+
+class TestHealthReminder(unittest.TestCase):
+    """久坐 / 喝水提醒。判据是系统空闲时间，不用窗口就能测。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-health-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_lines_are_wired(self):
+        self.assertTrue(S.SIT_LINES)
+        self.assertTrue(S.WATER_LINES)
+        self.assertIn("SIT_LINES", S.LINES)
+        self.assertIn("WATER_LINES", S.LINES)
+
+    def test_does_not_fire_immediately(self):
+        c = S.CompanionSource()
+        c.bubble = ""
+        c._health_check(time.time(), idle=1.0)
+        self.assertFalse(c.bubble, "刚启动就提醒了")
+
+    def test_break_resets_the_clock(self):
+        c = S.CompanionSource()
+        old = c.sitting_since
+        later = old + 100.0
+        c._health_check(later, idle=S.HEALTH_BREAK + 10)
+        self.assertEqual(c.sitting_since, later, "离开后没重置计时")
+
+    def test_fires_after_sitting_too_long(self):
+        c = S.CompanionSource()
+        now = time.time()
+        c.next_health = now - 1
+        c.sitting_since = now - S.HEALTH_EVERY - 10
+        c.bubble = ""
+        c._health_check(now, idle=1.0)
+        self.assertTrue(c.bubble, "久坐没提醒")
+
+    def test_alternates_between_sit_and_water(self):
+        c = S.CompanionSource()
+        seen = []
+        for _ in range(2):
+            now = time.time()
+            c.next_health = now - 1
+            c.sitting_since = now - S.HEALTH_EVERY - 10
+            c.bubble = ""
+            c._health_check(now, idle=1.0)
+            seen.append(c.bubble)
+        self.assertTrue(seen[0] and seen[1])
+        self.assertNotEqual(seen[0], seen[1], f"两次提醒一样：{seen}")
+
+    def test_quiet_when_idle(self):
+        """已经闲了一会儿就别打扰 —— 人可能在看手机。"""
+        c = S.CompanionSource()
+        now = time.time()
+        c.next_health = now - 1
+        c.sitting_since = now - S.HEALTH_EVERY - 10
+        c.bubble = ""
+        c._health_check(now, idle=120)
+        self.assertFalse(c.bubble)
+
+
+class TestWeekStats(unittest.TestCase):
+    """周报统计。"""
+
+    def test_empty_history(self):
+        m = S.Mood()
+        st = m.week_stats()
+        self.assertEqual(len(st["days"]), 7)
+        self.assertEqual(st["done"], 0)
+        self.assertEqual(st["slowest"], [])
+        self.assertIsNone(st["busiest"])
+
+    def test_counts_and_tool_totals(self):
+        m = S.Mood()
+        for _ in range(5):
+            m.note_completion(True)
+        m.note_completion(False)
+        m.note_tool("grep", 1200)
+        m.note_tool("grep", 800)
+        m.note_tool("job_output", 60000)
+        st = m.week_stats()
+        self.assertEqual(st["done"], 5)
+        self.assertEqual(st["failed"], 1)
+        self.assertEqual(st["slowest"][0][0], "job_output")
+        self.assertEqual(dict(st["slowest"])["grep"], 2000)
+        self.assertEqual(st["active_days"], 1)
+        self.assertIsNotNone(st["busiest"])
+
+    def test_bad_data_self_heals(self):
+        m = S.Mood()
+        m.history = "坏了"
+        m.note_completion(True)
+        self.assertIsInstance(m.history, dict)
+        m2 = S.Mood()
+        m2.history = {"2026-01-01": "坏"}
+        m2.note_tool("x", 100)
+        self.assertEqual(m2.week_stats()["done"], 0)
+
+    def test_history_is_trimmed(self):
+        m = S.Mood()
+        for i in range(40):
+            m.history[f"2026-01-{i % 28 + 1:02d}"] = {"done": 1, "failed": 0, "tools": {}}
+        m.note_completion(True)
+        self.assertLessEqual(len(m.history), m.HISTORY_DAYS,
+                             "history 没有修剪，会无限长")
+
+    def test_ignores_bad_tool_values(self):
+        m = S.Mood()
+        m.note_tool("", 100)                             # 空名字
+        m.note_tool("x", 0)                              # 0 毫秒
+        m.note_tool("y", -5)                             # 负数
+        self.assertEqual(m.week_stats()["slowest"], [])
 
 
 class TestConfig(unittest.TestCase):

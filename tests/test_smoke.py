@@ -340,10 +340,90 @@ class TestAppSmoke(unittest.TestCase):
             except Exception:                            # noqa: BLE001
                 pass
         # 比对翻译后的文案而不是写死中文 —— 这样切到英文也成立
-        want_install = I.t("从链接安装…")
-        want_remove = I.t("删除皮肤…")
-        self.assertIn(want_install, labels, labels)
-        self.assertIn(want_remove, labels, labels)
+        for key in ("预览…", "从链接安装…", "删除皮肤…"):
+            with self.subTest(item=key):
+                self.assertIn(I.t(key), labels, labels)
+
+    # ── 新窗口也要能打开 ──
+    def test_skin_preview_opens(self):
+        app = self._app()
+        app.root.update()
+        self._open_and_check(app, app._open_skin_preview, "皮肤预览")
+        app._preview_win = None
+
+    def test_skin_thumbnails_render(self):
+        app = self._app()
+        app.root.update()
+        for sid in ("dafeiyu", "kun-like", "matcha-sunny"):
+            with self.subTest(skin=sid):
+                thumb = app._skin_thumb(sid)
+                self.assertIsNotNone(thumb, f"{sid} 缩略图生成失败")
+                self.assertGreater(thumb.width, 0)
+
+    def test_session_actions_window_opens(self):
+        app = self._app()
+        app.root.update()
+        app.snap = P.Snapshot(state="tools", session_id="s1", title="测试任务",
+                              tasks=[P.TaskInfo(session_id="s1", state="tools",
+                                                title="测试任务")])
+        self._open_and_check(app, app._open_session_actions, "会话操作")
+        app._sess_win = None
+
+    def test_session_actions_opens_without_tasks(self):
+        """没有活跃会话时也要能开（说明一下就行），不该崩。"""
+        app = self._app()
+        app.root.update()
+        app.snap = P.Snapshot(state="idle")
+        app._open_session_actions()
+        app.root.update()
+        self.assertIsNotNone(app._sess_win)
+        app._sess_win.destroy()
+        app._sess_win = None
+
+    def test_weekly_report_exports(self):
+        app = self._app(no_companion=False)
+        app.root.update()
+        app._export_week()
+        out = os.path.join(self.tmp, "周报.png")
+        self.assertTrue(os.path.exists(out), "周报没生成")
+        self.assertGreater(os.path.getsize(out), 1000)
+
+    def test_click_on_card_opens_sessions_not_poke(self):
+        """点信息卡 = 会话操作；点角色 = 摸她。
+
+        这条守着那次改动 —— 两件事的意图完全不同，混在一起两边都不好用。
+        """
+        app = self._app()
+        app.root.update()
+
+        class E:
+            x_root = 100
+            y_root = 100
+            x = 10
+            y = P.PET_AREA_H + 20                        # 卡片区
+        app._on_press(E())
+        app._on_release(E())
+        app.root.update()
+        self.assertIsNotNone(getattr(app, "_sess_win", None),
+                             "点卡片没开会话窗口")
+        app._sess_win.destroy()
+        app._sess_win = None
+
+    def test_click_on_character_pokes(self):
+        app = self._app()
+        app.root.update()
+        before = app.companion.mood.pokes if app.companion else 0
+
+        class E:
+            x_root = 100
+            y_root = 100
+            x = 10
+            y = 10                                       # 角色区
+        app._on_press(E())
+        app._on_release(E())
+        app.root.update()
+        if app.companion is not None:
+            self.assertGreater(app.companion.mood.pokes, before, "点角色没记一笔")
 
     def test_quit_is_clean(self):
         app = P.PetApp(self._args())

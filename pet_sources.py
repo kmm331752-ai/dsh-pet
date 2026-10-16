@@ -484,6 +484,14 @@ IDLE_SLEEP = 240.0
 NIGHT_IDLE_SLEEP = 30.0
 NIGHT_HOURS = (23, 7)            # [23:00, 07:00)
 
+# ── 健康提醒 ────────────────────────────────────────────────────────────────
+# 判据是系统空闲时间：idle 很短 = 人在用电脑，一直很短 = 久坐。
+# 走开超过 HEALTH_BREAK 就重置计时，回来重新算，不会追着人提醒。
+HEALTH_ON = True
+HEALTH_EVERY = 50 * 60           # 连续活动多久提醒一次
+HEALTH_FIRST = 45 * 60           # 启动后多久开始算（别一开就提醒）
+HEALTH_BREAK = 5 * 60            # 离开这么久算休息过
+
 
 def cursor_pos() -> tuple:
     """当前鼠标的屏幕坐标。
@@ -530,6 +538,89 @@ class Mood:
     # 目的是让她学到「你几点在、几点不在」，而不是死按 23:00~07:00 判断夜晚。
     busy_slots: list = field(default_factory=lambda: [0] * 24)
     seen_slots: list = field(default_factory=lambda: [0] * 24)
+    # 任务统计（给周报用）。按天存，只留最近 30 天。
+    # {日期: {"done": 完成数, "failed": 失败数, "tools": {工具名: 累计毫秒}}}
+    history: dict = field(default_factory=dict)
+
+    # -- 任务统计 -----------------------------------------------------------
+    HISTORY_DAYS = 30
+
+    def _day_slot(self) -> dict:
+        """取今天的统计格子。手改坏了的 json 也能自愈。"""
+        if not isinstance(self.history, dict):
+            self.history = {}
+        day = time.strftime("%Y-%m-%d")
+        slot = self.history.get(day)
+        if not isinstance(slot, dict):
+            slot = {}
+            self.history[day] = slot
+        if not isinstance(slot.get("tools"), dict):
+            slot["tools"] = {}
+        slot.setdefault("done", 0)
+        slot.setdefault("failed", 0)
+        return slot
+
+    def note_completion(self, ok: bool = True) -> None:
+        """记一次任务结束。"""
+        slot = self._day_slot()
+        key = "done" if ok else "failed"
+        try:
+            slot[key] = int(slot.get(key, 0)) + 1
+        except (TypeError, ValueError):
+            slot[key] = 1
+        self._trim_history()
+
+    def note_tool(self, name: str, ms: float) -> None:
+        """记一次工具耗时。"""
+        if not name or not ms or ms <= 0:
+            return
+        slot = self._day_slot()
+        try:
+            slot["tools"][str(name)] = float(slot["tools"].get(str(name), 0)) + float(ms)
+        except (TypeError, ValueError):
+            slot["tools"][str(name)] = float(ms)
+        self._trim_history()
+
+    def _trim_history(self) -> None:
+        """只留最近 HISTORY_DAYS 天 —— 不然 json 会无限长。"""
+        if len(self.history) <= self.HISTORY_DAYS:
+            return
+        for day in sorted(self.history)[:-self.HISTORY_DAYS]:
+            self.history.pop(day, None)
+
+    def week_stats(self) -> dict:
+        """最近 7 天的汇总，给周报用。"""
+        days = []
+        now = time.time()
+        for i in range(6, -1, -1):
+            day = time.strftime("%Y-%m-%d", time.localtime(now - i * 86400))
+            slot = self.history.get(day) if isinstance(self.history, dict) else None
+            if not isinstance(slot, dict):
+                slot = {}
+            tools = slot.get("tools")
+            days.append({
+                "day": day,
+                "done": int(slot.get("done", 0) or 0),
+                "failed": int(slot.get("failed", 0) or 0),
+                "tools": dict(tools) if isinstance(tools, dict) else {},
+            })
+        merged: dict = {}
+        for d in days:
+            for name, ms in d["tools"].items():
+                try:
+                    merged[name] = merged.get(name, 0.0) + float(ms)
+                except (TypeError, ValueError):
+                    continue
+        slowest = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        busiest = max(days, key=lambda d: d["done"]) if days else None
+        return {
+            "days": days,
+            "done": sum(d["done"] for d in days),
+            "failed": sum(d["failed"] for d in days),
+            "slowest": slowest,
+            "busiest": busiest if busiest and busiest["done"] else None,
+            "active_days": sum(1 for d in days if d["done"] or d["failed"]),
+        }
 
     # -- 作息统计 -----------------------------------------------------------
     # 样本不够时不下结论 —— 刚开始用的一两个小时不该让她误以为你半夜不睡。
@@ -644,6 +735,41 @@ class CompanionSource:
         self.pet_x = 0                  # 桌宠窗口左边 x
         self.gaze_dir = 1               # 1 向右看，-1 向左看
         self.wander_target = 0.0        # 溜达的窗口目标 x（0 = 不动）
+        # 健康提醒：连续活动多久了（人一直没离开就是久坐）
+        self.sitting_since = time.time()
+        self.next_health = time.time() + HEALTH_FIRST
+        self.health_flip = False        # 在「起来动动」和「喝口水」之间轮换
+
+    # -- 健康提醒 -----------------------------------------------------------
+    def _health_check(self, now: float, idle: float) -> None:
+        """久坐 / 喝水提醒。
+
+        判据是**系统空闲时间**：idle 很短说明人在用电脑，一直很短就是久坐。
+        走开超过 HEALTH_BREAK 就重置 —— 回来了重新算，不会追着人提醒。
+        """
+        if idle >= HEALTH_BREAK:
+            # 离开过，重新计时；顺便把下一次提醒也推后
+            self.sitting_since = now
+            self.next_health = now + HEALTH_FIRST
+            return
+        if idle > 60:
+            return                                       # 已经闲了一会儿，别打扰
+        if now < self.next_health:
+            return
+        sitting = now - self.sitting_since
+        if sitting < HEALTH_EVERY:
+            return
+        # 轮换文案，别每次都一样。
+        # 写成两个显式的 say_line("KEY") 而不是 say_line(key) ——
+        # 有个测试守着「每个台词表都要被 say_line 到」，传变量它就看不见了。
+        if self.health_flip:
+            line = say_line("WATER_LINES")
+        else:
+            line = say_line("SIT_LINES")
+        self.health_flip = not self.health_flip
+        if line:
+            self.say(line, 5.5)
+        self.next_health = now + HEALTH_EVERY
 
     # -- 持久化 -------------------------------------------------------------
     def _load(self) -> Mood:
@@ -785,6 +911,8 @@ class CompanionSource:
                     self.next_peek = now + random.uniform(120, 300)
 
         self._situational(now, idle, night)
+        if HEALTH_ON:
+            self._health_check(now, idle)
 
         # ── 组装 Snapshot ──
         m = self.mood
@@ -884,6 +1012,8 @@ MORNING_LINES = ["早啊", "今天也加油", "睡醒啦"]
 NIGHT_LINES = ["还不睡？", "该休息了", "夜深了"]
 EDGE_LINES = ["抓到了", "不松手", "救命…"]
 POMO_DONE_LINES = ["时间到！", "该休息了", "这一轮结束了", "起来走两步吧"]
+SIT_LINES = ["坐好久了，起来动动", "腰要断了，站一会儿吧", "别一直坐着啦"]
+WATER_LINES = ["喝口水吧", "该补水了", "杯子空了吧"]
 
 # ── 台词表 ──────────────────────────────────────────────────────────────────
 # 想换成自己的一套（毒舌版、温柔版…）：把同名键写进 <程序目录>/pet_lines.json，
@@ -898,6 +1028,7 @@ _LINE_DEFAULTS = {
     "HUNGRY_LINES": HUNGRY_LINES, "LONELY_LINES": LONELY_LINES,
     "MORNING_LINES": MORNING_LINES, "NIGHT_LINES": NIGHT_LINES,
     "EDGE_LINES": EDGE_LINES, "POMO_DONE_LINES": POMO_DONE_LINES,
+    "SIT_LINES": SIT_LINES, "WATER_LINES": WATER_LINES,
 }
 
 

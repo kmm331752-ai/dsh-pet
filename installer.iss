@@ -14,7 +14,7 @@
 
 #define AppName "DSH 桌宠"
 #define AppExe "DSH-Pet.exe"
-#define AppVersion "1.5.1"
+#define AppVersion "1.6.0"
 #define AppPublisher "kmm331752-ai"
 #define AppUrl "https://github.com/kmm331752-ai/dsh-pet"
 
@@ -41,7 +41,10 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; 卸载会一起删掉，README 里写了怎么手动备份
 
 [Languages]
-Name: "chinese"; MessagesFile: "compiler:Default.isl"
+; Inno Setup 默认只带 Default.isl（英文）。想加中文要自己把
+; Languages\ChineseSimplified.isl 放进 Inno 的安装目录（官方仓库有非官方译本）。
+; 之前这里写了两条都指向 Default.isl —— 那条 "chinese" 其实显示的是英文，
+; 只是名字叫 chinese 而已。属于自欺欺人，删掉。
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

@@ -49,7 +49,10 @@ jobs:
           pip install svglib reportlab pypdfium2
 
       - name: 跑测试（测试不过就不发版）
-        run: python tests/test_pet.py
+        run: |
+          python tests/test_pet.py
+          python tests/test_smoke.py
+          python tests/test_e2e.py
 
       - name: 构建 exe
         run: python build_exe.py
@@ -67,10 +70,38 @@ jobs:
           # —— 这种"少功能"不会报错，只能靠体积拦。
           if ($mb -lt 48) { throw "exe 偏小（$mb MB），可能漏装了可选依赖" }
 
+      - name: 装 Inno Setup
+        # runner 上自带 chocolatey，装完就有 ISCC.exe。
+        # 本机没装，所以安装包一直没被真正构建过 —— 放到 CI 里才验证得了。
+        run: choco install innosetup --no-progress -y
+
+      - name: 构建安装包
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "找不到 ISCC.exe" }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败" }
+          Get-ChildItem installer\*.exe | ForEach-Object {
+            Write-Host "安装包: $($_.Name)  $([math]::Round($_.Length/1MB,1)) MB"
+          }
+
+      - name: 校验安装包
+        run: |
+          $setup = Get-ChildItem installer\DSH-Pet-Setup-*.exe -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          if (-not $setup) { throw "没生成安装包" }
+          # installer.iss 里 Source 引用的四个文件，缺一个 Inno 就编不过，
+          # 能编过就说明都在。这里再确认一次产物本身合理。
+          $mb = $setup.Length / 1MB
+          if ($mb -lt 20) { throw "安装包偏小（$mb MB），可能漏打了主程序" }
+          Write-Host "✅ $($setup.Name)  $([math]::Round($mb,1)) MB"
+
       - name: 发布
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: dist/DSH-Pet.exe
+          files: |
+            dist/DSH-Pet.exe
+            installer/DSH-Pet-Setup-*.exe
           generate_release_notes: true
           draft: false

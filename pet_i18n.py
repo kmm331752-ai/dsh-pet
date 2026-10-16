@@ -261,6 +261,12 @@ EN = {
     "抓到了": "Gotcha",
     "不松手": "Not letting go",
     "救命…": "Help…",
+    "坐好久了，起来动动": "You've been sitting a while — move about",
+    "腰要断了，站一会儿吧": "Your back will ache — stand up a bit",
+    "别一直坐着啦": "Don't sit forever",
+    "喝口水吧": "Have some water",
+    "该补水了": "Time to hydrate",
+    "杯子空了吧": "Your cup's probably empty",
 
     # ── 设置窗口底部的热键说明 ──
     "热键：Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置\n"
@@ -311,6 +317,38 @@ EN = {
     "进度": "Progress",
     "输出": "Output",
     "大肥鱼（内置）": "Dafeiyu (built-in)",
+
+    # ── 皮肤预览 ──
+    "预览…": "Preview…",
+    "皮肤预览": "Skin preview",
+    "点一下直接换": "Click one to switch",
+
+    # ── 周报 ──
+    "导出周报…": "Export weekly report…",
+    "这周": "This week",
+    "跑了": "Ran",
+    "个任务": "tasks",
+    "失败": "failed",
+    "最慢的工具": "Slowest tools",
+    "这周还没干什么，下周加油": "Nothing much this week — next week then",
+    "写好啦": "Written",
+
+    # ── 会话操作 ──
+    "会话": "Sessions",
+    "打开日志": "Open log",
+    "复制 ID": "Copy ID",
+    "复制摘要": "Copy summary",
+    "把 DSH 切到前台": "Bring DSH to front",
+    "现在没有活跃会话": "No active session right now",
+    "已复制会话 ID": "Session ID copied",
+    "已复制摘要": "Summary copied",
+    "没找到 DSH 窗口": "Could not find the DSH window",
+    "DSH 已切到前台": "DSH brought to front",
+    "切不过去": "Could not switch",
+    "DSH 没有「直接跳到某个会话」的接口，"
+    "复制 ID 后在 DSH 里搜，或打开日志目录看原始记录。":
+        "DSH has no API to jump straight to a session — "
+        "copy the ID and search in DSH, or open the log folder.",
 
     # ── 托盘 ──
     "显示 / 隐藏桌宠": "Show / hide the pet",
