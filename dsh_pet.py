@@ -387,7 +387,10 @@ class PetApp:
         win.title("DSH 桌宠 · 设置")
         win.resizable(False, False)
         win.attributes("-topmost", True)
-        pad = dict(padx=14, pady=6, anchor="w")
+        # 这些参数是给 grid() 的 —— 左对齐要写 sticky，不是 anchor。
+        # 写成 anchor 会让第一个 Checkbutton 就抛 TclError，
+        # 整个设置窗口建不起来（而且异常被 Tk 吞在回调里，看着就是"点了没反应"）。
+        pad = dict(padx=14, pady=6, sticky="w")
 
         row = 0
         tk.Label(win, text="行为", font=("Microsoft YaHei UI", 10, "bold")).grid(

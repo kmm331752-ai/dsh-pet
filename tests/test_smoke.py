@@ -229,6 +229,93 @@ class TestAppSmoke(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(repo, "相处记录.png")),
                          "导出写到了仓库根目录，测试没隔离干净")
 
+    # ── 所有对话框都要能打开 ──
+    #
+    # 这一组是补的：设置窗口一直打不开，因为 pad 字典里写了 anchor="w"，
+    # 而 anchor 是 pack 的选项，grid 要用 sticky —— 第一个 Checkbutton
+    # 就抛 TclError。而 Tk 会把回调里的异常吞掉（只打到 stderr），
+    # 用户看到的就是「右键点设置没反应」。
+    #
+    # 冒烟测试当时只测了主窗口，没碰任何 Toplevel，所以全绿。
+    # 教训：**每个能打开的窗口都要有一条测试**，不是只测主窗口。
+
+    def _open_and_check(self, app, opener, name):
+        opener()
+        app.root.update()
+        wins = [w for w in app.root.winfo_children() if w.winfo_class() == "Toplevel"]
+        self.assertTrue(wins, f"{name} 没建出窗口")
+        win = wins[-1]
+        self.assertTrue(win.winfo_exists(), f"{name} 窗口不存在")
+        self.assertGreater(win.winfo_width(), 1, f"{name} 宽度不对")
+        self.assertGreater(win.winfo_height(), 1, f"{name} 高度不对")
+        win.destroy()
+        app.root.update()
+
+    def test_settings_window_opens(self):
+        app = self._app()
+        app.root.update()
+        self._open_and_check(app, app._open_settings, "设置窗口")
+
+    def test_settings_window_is_reusable(self):
+        """再点一次应该复用已开的窗口，而不是堆一叠。"""
+        app = self._app()
+        app.root.update()
+        app._open_settings()
+        app.root.update()
+        first = app._settings_win
+        app._open_settings()
+        app.root.update()
+        self.assertIs(app._settings_win, first, "第二次点击又建了一个窗口")
+
+    def test_settings_checkbuttons_all_exist(self):
+        """设置窗口里每个复选框都要真的建出来。
+
+        直接数 widget —— pad 参数写错会让某一个 Checkbutton 抛异常，
+        而它后面的控件全都不会建。
+        """
+        app = self._app()
+        app.root.update()
+        app._open_settings()
+        app.root.update()
+        win = app._settings_win
+        checks = [w for w in win.winfo_children()
+                  if w.winfo_class() == "Checkbutton"]
+        self.assertGreaterEqual(len(checks), 4, f"复选框只有 {len(checks)} 个")
+        buttons = [w for w in win.winfo_children() if w.winfo_class() == "Button"]
+        self.assertTrue(buttons, "设置窗口没有按钮")
+        win.destroy()
+        app._settings_win = None
+
+    def test_error_log_window_opens(self):
+        app = self._app()
+        app.root.update()
+        self._open_and_check(app, app._show_error_log, "出错日志窗口")
+
+    def test_skin_install_dialog_opens(self):
+        app = self._app()
+        app.root.update()
+        self._open_and_check(app, app._install_skin_dialog, "皮肤安装窗口")
+
+    def test_skin_remove_dialog_opens_or_says_so(self):
+        """没有可删的皮肤时不弹窗、只说一句 —— 也不该崩。"""
+        app = self._app()
+        app.root.update()
+        app._remove_skin_dialog()                        # 不该抛
+        app.root.update()
+
+    def test_skin_menu_has_install_entries(self):
+        app = self._app()
+        app.root.update()
+        labels = []
+        for i in range(app._skin_menu.index("end") + 1):
+            try:
+                if app._skin_menu.type(i) == "command":
+                    labels.append(app._skin_menu.entrycget(i, "label"))
+            except Exception:                            # noqa: BLE001
+                pass
+        self.assertTrue(any("安装" in x for x in labels), labels)
+        self.assertTrue(any("删除" in x for x in labels), labels)
+
     def test_quit_is_clean(self):
         app = P.PetApp(self._args())
         app.root.update()
