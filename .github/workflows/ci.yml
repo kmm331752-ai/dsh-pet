@@ -33,10 +33,16 @@ jobs:
           # 只装跑测试需要的；pystray / numpy 是可选功能，测试里不碰
           pip install pillow zstandard
 
-      - name: 跑测试
+      - name: 单元测试（状态机 / 渲染 / 解析 / 出错日志）
         run: python tests/test_pet.py
+
+      - name: 冒烟测试（真的把 PetApp 建起来）
+        # 这一层才是拦「启动即崩」的 —— 两次发版事故（self.greeted、
+        # _skin_menu）都是启动就崩，而单元测试一个都没拦住，
+        # 因为它们根本不构造 PetApp。
+        run: python tests/test_smoke.py
 
       - name: 语法检查（打包脚本也要能编译）
         run: |
           python -m py_compile dsh_pet.py build_exe.py
-          python -m py_compile tests/test_pet.py
+          python -m py_compile tests/test_pet.py tests/test_smoke.py

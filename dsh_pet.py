@@ -75,6 +75,9 @@ def data_dir() -> str:
 
 
 CONFIG_PATH = os.path.join(data_dir(), "pet_config.json")
+# 出错日志。exe 模式下 stderr 是没人看的 —— 用户只会说"它不显示了"，
+# 所以任何异常都要落盘，让问题可追。
+ERROR_LOG = os.path.join(data_dir(), "pet_error.log")
 # 单实例锁用的本地端口（只绑 127.0.0.1，不对外）
 SINGLE_INSTANCE_PORT = 51937
 
@@ -317,7 +320,7 @@ def make_display(root, w: int, h: int):
     try:
         return LayeredDisplay(root, w, h), "layered"
     except Exception as exc:                             # noqa: BLE001
-        print(f"[warn] 分层窗口不可用（{exc}），回退到透明色方案", file=sys.stderr)
+        log_error("分层窗口不可用，回退到透明色方案", exc)
         return ColorKeyDisplay(root, w, h), "colorkey"
 
 
@@ -1046,13 +1049,13 @@ def load_skin(skin_id: str):
             try:
                 return AtlasSkin(s["path"], s["id"], s["display"])
             except Exception as exc:                     # noqa: BLE001
-                print(f"[warn] 皮肤 {skin_id} 加载失败（{exc}），改用内置", file=sys.stderr)
+                log_error(f"皮肤 {skin_id} 加载失败，改用内置", exc)
                 break
         if s["kind"] == "clawd":
             try:
                 return ClawdThemeSkin(s["path"], s["id"], s["display"])
             except Exception as exc:                     # noqa: BLE001
-                print(f"[warn] clawd 主题 {skin_id} 加载失败（{exc}），改用内置",
+                log_error(f"clawd 主题 {skin_id} 加载失败，改用内置",
                       file=sys.stderr)
                 break
         return DafeiyuSkin()
@@ -1324,6 +1327,77 @@ def _read_json(path: str) -> Optional[dict]:
             return json.load(fh)
     except Exception:                                    # noqa: BLE001
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 出错日志
+# ─────────────────────────────────────────────────────────────────────────────
+# 打包成 exe 之后 stderr 是黑洞 —— 双击运行的窗口程序没有控制台，
+# print 出去的东西谁也没看见。所以异常必须落盘，否则用户只能反馈
+# "它不显示了"，我们一点线索都没有。
+#
+# 只记异常和警告，不记正常流程；超过 256KB 就截掉前半，避免无限增长。
+
+ERROR_LOG_MAX = 256 * 1024
+# 同一个位置多久之内不重复往控制台打。文件里照记，只是别刷屏 ——
+# _tick 是 30ms 一次的循环，它要是坏了，控制台会被瞬间刷爆。
+ERROR_STDERR_THROTTLE = 10.0
+_last_stderr: dict = {}
+
+
+def log_error(where: str, exc: BaseException) -> None:
+    """把一个异常写进 pet_error.log。本身绝不能抛 —— 它已经在处理异常了。"""
+    try:
+        import traceback
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        line = f"\n[{stamp}] {where}\n{tb}"
+        # 先看看会不会超限，超了就保留后半
+        try:
+            size = os.path.getsize(ERROR_LOG)
+        except OSError:
+            size = 0
+        if size + len(line.encode("utf-8", "replace")) > ERROR_LOG_MAX:
+            try:
+                with open(ERROR_LOG, "rb") as fh:
+                    tail = fh.read()[-ERROR_LOG_MAX // 2:]
+                with open(ERROR_LOG, "wb") as fh:
+                    fh.write(b"...(log truncated)...\n" + tail)
+            except OSError:
+                pass
+        with open(ERROR_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:                                    # noqa: BLE001
+        pass
+    # 控制台也留一份（从源码跑时看得到），但同一个位置节流，
+    # 免得循环里的错误把终端刷爆。
+    try:
+        now = time.time()
+        if now - _last_stderr.get(where, 0.0) >= ERROR_STDERR_THROTTLE:
+            _last_stderr[where] = now
+            print(f"[error] {where}: {exc}", file=sys.stderr)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def install_excepthook() -> None:
+    """兜住没被捕获的异常，别让它静默消失。"""
+    def hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return
+        log_error("未捕获异常", exc)
+
+    sys.excepthook = hook
+
+
+def read_error_log(max_lines: int = 40) -> str:
+    """读日志尾部，给设置窗口显示用。"""
+    try:
+        with open(ERROR_LOG, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+        return "\n".join(lines[-max_lines:])
+    except OSError:
+        return ""
 
 
 def list_session_files() -> list:
@@ -2310,7 +2384,7 @@ def set_autostart(on: bool) -> bool:
                     pass
         return True
     except Exception as exc:                             # noqa: BLE001
-        print(f"[warn] 设置开机自启失败：{exc}", file=sys.stderr)
+        log_error("设置开机自启失败", exc)
         return False
 
 
@@ -2331,6 +2405,9 @@ class PetApp:
 
         self.root = tk.Tk()
         self.root.title("DSH Pet")
+        # Tk 回调（事件绑定、after 任务）里抛的异常默认只打到 stderr ——
+        # exe 模式下那是黑洞。接过来落盘。
+        self.root.report_callback_exception = lambda *a: log_error("Tk 回调异常", a[1])
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", bool(self.cfg.get("always_on_top", True)))
         self.root.resizable(False, False)
@@ -2438,7 +2515,7 @@ class PetApp:
         try:
             items = self.skin.frames(st)
         except Exception as exc:                         # noqa: BLE001
-            print(f"[warn] 状态 {st} 渲染失败：{exc}", file=sys.stderr)
+            log_error(f"状态 {st} 渲染失败", exc)
             items = []
         self.sprites[st] = [im for im, _ in items]
         self.durations[st] = [d for _, d in items]
@@ -2458,7 +2535,7 @@ class PetApp:
             try:
                 items = self.skin.reaction_frames(kind)
             except Exception as exc:                     # noqa: BLE001
-                print(f"[warn] 反应素材 {kind} 加载失败：{exc}", file=sys.stderr)
+                log_error(f"反应素材 {kind} 加载失败", exc)
                 items = []
             self.reaction_sprites[kind] = [im for im, _ in items]
             self.reaction_durs[kind] = [d for _, d in items]
@@ -2662,6 +2739,7 @@ class PetApp:
         btns.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 6))
         tk.Button(btns, text="位置复位", command=reset_pos).pack(side="left")
         tk.Button(btns, text="重置相处记录", command=forget_me).pack(side="left", padx=6)
+        tk.Button(btns, text="出错日志", command=self._show_error_log).pack(side="left")
         row += 1
 
         status = tk.Label(win, text="", fg="#666")
@@ -2688,7 +2766,7 @@ class PetApp:
                 self.hotkeys = HotKeys(sink=self._tray_actions.append)
                 self.hotkeys.start()
             except Exception as exc:                     # noqa: BLE001
-                print(f"[warn] 全局热键注册失败：{exc}", file=sys.stderr)
+                log_error("全局热键注册失败", exc)
                 self.hotkeys = None
         try:
             import pystray
@@ -2706,7 +2784,7 @@ class PetApp:
             # pystray 自带消息循环，放后台线程；菜单回调只投递动作，主线程执行
             threading.Thread(target=self.tray.run, daemon=True).start()
         except Exception as exc:                          # noqa: BLE001
-            print(f"[warn] 托盘图标不可用（{exc}）", file=sys.stderr)
+            log_error("托盘图标不可用", exc)
             self.tray = None
 
     def _tray_image(self) -> Image.Image:
@@ -2851,7 +2929,34 @@ class PetApp:
             if self.companion is not None:
                 self.companion.say("记好啦", 2.5)
         except Exception as exc:                         # noqa: BLE001
-            print(f"[warn] 导出失败：{exc}", file=sys.stderr)
+            log_error("导出相处记录失败", exc)
+
+    def _show_error_log(self) -> None:
+        """看出错日志。没有日志就说没有 —— 别弹一个空白窗口让人以为坏了。"""
+        tk = self.tk
+        text = read_error_log(60)
+        win = tk.Toplevel(self.root)
+        win.title("DSH 桌宠 · 出错日志")
+        win.geometry("720x420")
+        win.attributes("-topmost", True)
+        body = (text if text.strip()
+                else f"没有出错记录。\n\n日志文件位置：\n{ERROR_LOG}")
+        box = tk.Text(win, wrap="none", font=("Consolas", 9))
+        box.insert("1.0", body)
+        box.configure(state="disabled")
+        box.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Button(bar, text="清空日志", command=lambda: (
+            self._clear_error_log(), win.destroy())).pack(side="left")
+        tk.Button(bar, text="关闭", command=win.destroy).pack(side="right")
+
+    @staticmethod
+    def _clear_error_log() -> None:
+        try:
+            open(ERROR_LOG, "w").close()
+        except OSError:
+            pass
 
     def _check_update_async(self) -> None:
         """后台查一次新版本，结果塞进动作队列 —— 不阻塞界面。"""
@@ -3204,7 +3309,7 @@ class PetApp:
                         wx += WANDER_STEP if target > wx else -WANDER_STEP
                         self.root.geometry(f"+{wx}+{self.root.winfo_y()}")
         except Exception as exc:                         # noqa: BLE001
-            print(f"[warn] poll: {exc}", file=sys.stderr)
+            log_error("poll 轮询异常", exc)
         self.root.after(POLL_MS, self._poll)
 
     def _demo_snapshot(self, state: str) -> Snapshot:
@@ -3301,7 +3406,7 @@ class PetApp:
             self.display.push(canvas)
             self._tray_sync()
         except Exception as exc:                         # noqa: BLE001
-            print(f"[warn] tick: {exc}", file=sys.stderr)
+            log_error("tick 渲染异常", exc)
         # 刷新间隔跟着当前皮肤的帧时长走：帧短就刷快点（whale-chan 是 17ms/帧），
         # 帧长就慢下来省 CPU（内置皮肤是 95ms）。范围夹在 33~100ms。
         try:
@@ -3398,6 +3503,9 @@ def main() -> int:
     ap.add_argument("--no-hotkeys", action="store_true",
                     help="不注册全局热键（Ctrl+Alt+P 显示隐藏 / +F 喂食 / +S 设置）")
     args = ap.parse_args()
+
+    # 尽早装上 —— 之后任何未捕获异常都会落盘，而不是消失在 exe 的 stderr 黑洞里
+    install_excepthook()
 
     if args.list_skins:
         for s in discover_skins():

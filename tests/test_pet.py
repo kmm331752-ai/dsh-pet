@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 import unittest.mock as mock
@@ -340,6 +342,81 @@ class TestSourceSanity(unittest.TestCase):
                 self.assertRegex(
                     self.src, rf'say_line\([^)]*"{key}"',
                     f"{key} 定义了但没有任何地方 say_line 它")
+
+
+class TestErrorLog(unittest.TestCase):
+    """出错日志：打包成 exe 之后 stderr 是黑洞，异常必须落盘。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-err-")
+        self._orig = P.ERROR_LOG
+        P.ERROR_LOG = os.path.join(self.tmp, "pet_error.log")
+        P._last_stderr.clear()
+
+    def tearDown(self):
+        P.ERROR_LOG = self._orig
+        P._last_stderr.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_missing_log_reads_empty(self):
+        self.assertEqual(P.read_error_log(), "")
+
+    def test_records_where_message_and_traceback(self):
+        try:
+            raise ValueError("测试异常消息")
+        except ValueError as exc:
+            P.log_error("测试位置", exc)
+        text = P.read_error_log()
+        self.assertIn("测试位置", text)
+        self.assertIn("测试异常消息", text)
+        self.assertIn("Traceback", text)
+
+    def test_stderr_is_throttled_but_file_is_not(self):
+        """同一个位置连续报错：控制台只出一行，文件一条不漏。
+
+        _tick 是 30ms 一次的循环，它要是坏了而没节流，终端会被瞬间刷爆。
+        """
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            for _ in range(50):
+                try:
+                    raise RuntimeError("重复错误")
+                except RuntimeError as exc:
+                    P.log_error("同一个位置", exc)
+        self.assertEqual(len([ln for ln in buf.getvalue().splitlines() if ln.strip()]), 1)
+        with open(P.ERROR_LOG, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().count("同一个位置"), 50)
+
+    def test_log_is_truncated_instead_of_growing_forever(self):
+        for i in range(300):
+            try:
+                raise RuntimeError("x" * 400)
+            except RuntimeError as exc:
+                P.log_error(f"填充 {i}", exc)
+        size = os.path.getsize(P.ERROR_LOG)
+        self.assertLess(size, P.ERROR_LOG_MAX * 1.5,
+                        "日志没有截断，长期运行会无限增长")
+
+    def test_log_error_never_raises(self):
+        """日志函数本身绝不能抛 —— 它已经在处理异常了。"""
+        class Bad(Exception):
+            def __str__(self):
+                raise RuntimeError("连 __str__ 都坏了")
+        try:
+            P.log_error("坏异常", Bad())
+        except Exception as exc:                         # noqa: BLE001
+            self.fail(f"log_error 抛了：{exc}")
+
+    def test_excepthook_is_installed(self):
+        before = sys.excepthook
+        P.install_excepthook()
+        self.assertIsNot(sys.excepthook, before)
+        # 钩子本身要能吞下异常并落盘
+        sys.excepthook(ValueError, ValueError("钩子测试"), None)
+        self.assertIn("钩子测试", P.read_error_log())
+        sys.excepthook = before
 
 
 class TestConfig(unittest.TestCase):
