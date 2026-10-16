@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dsh_pet as P  # noqa: E402
 import pet_base as B  # noqa: E402
+import pet_i18n as I  # noqa: E402
 
 
 def tk_available() -> bool:
@@ -51,6 +52,11 @@ class TestAppSmoke(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dsh-pet-smoke-")
+        # 语言固定成中文，别跟着机器走 —— CI 的 runner 是英文环境，
+        # 而有些断言（比如菜单里有没有「安装」）是看文案的。
+        # 不固定的话同一份代码在本地过、在 CI 挂（踩过）。
+        self._orig_lang = I.current()
+        I.set_language("zh")
         # 只改一处：pet_base.data_dir 是所有可变路径的唯一真实来源，
         # 配置、相处记录、出错日志、台词包都从它派生。
         # （拆文件之前是改 CONFIG_PATH/MOOD_PATH 那几个常量 ——
@@ -64,6 +70,7 @@ class TestAppSmoke(unittest.TestCase):
 
     def tearDown(self):
         B.data_dir = self._orig_data_dir
+        I.set_language(self._orig_lang)
         sys.modules.pop("pystray", None)
         if self._saved_pystray is not None:
             sys.modules["pystray"] = self._saved_pystray
@@ -332,8 +339,11 @@ class TestAppSmoke(unittest.TestCase):
                     labels.append(app._skin_menu.entrycget(i, "label"))
             except Exception:                            # noqa: BLE001
                 pass
-        self.assertTrue(any("安装" in x for x in labels), labels)
-        self.assertTrue(any("删除" in x for x in labels), labels)
+        # 比对翻译后的文案而不是写死中文 —— 这样切到英文也成立
+        want_install = I.t("从链接安装…")
+        want_remove = I.t("删除皮肤…")
+        self.assertIn(want_install, labels, labels)
+        self.assertIn(want_remove, labels, labels)
 
     def test_quit_is_clean(self):
         app = P.PetApp(self._args())
