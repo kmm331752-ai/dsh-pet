@@ -619,6 +619,17 @@ def test_config_reaches_the_screen(self):
 CI 在 Windows + Python 3.10/3.12 上跑这三套，push 和 PR 都触发。
 发版时再跑一遍，**测试不过就不发**。
 
+### 📌 要改这个仓库的话，先看 [AGENTS.md](AGENTS.md)
+
+那份文件是**踩坑记录**，不是风格指南 —— 每条规则后面都挂着真实事故。
+排第一的是：
+
+> **加功能，默认先写一条走 `_poll` 的测试。**
+
+因为同一个错误犯了两次：测试直接调内部函数（`draw_accessory()`、
+`_health_check()`）都通过，但真实调用路径上有 bug —— 配饰被 BOM 吞掉配置、
+久坐提醒挂在只在 DSH 空闲时才跑的 `poll()` 里。**两次都是用户发现的。**
+
 ## 🔌 DSH 插件（可选）
 
 `dsh-plugin/` 里有个 DSH 插件，作用是**随 DSH 启动自动拉起桌宠**，
