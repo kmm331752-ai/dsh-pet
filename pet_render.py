@@ -21,6 +21,8 @@ from pet_base import *
 # 否则渲染时 NameError（踩过：_GLOW_CACHE / _rgba 缺失，所有状态都渲染不出来）。
 from pet_base import _GLOW_CACHE, _VIEW_CACHE, _gear, _rgba
 
+import pet_i18n
+
 from pet_types import Snapshot, TaskInfo
 
 
@@ -336,7 +338,8 @@ class DafeiyuSkin:
 
     kind = "dafeiyu"
 
-    def __init__(self, path=None, name="dafeiyu", display="大肥鱼（内置）", frames: int = 12):
+    def __init__(self, path=None, name="dafeiyu", display=None, frames: int = 12):
+        display = display or pet_i18n.t("大肥鱼（内置）")
         self.name, self.display = name, display
         self.n = frames
 
@@ -658,7 +661,8 @@ class ClawdThemeSkin:
 
 def discover_skins() -> list:
     """内置皮肤 + Codex 契约包 + clawd 主题。"""
-    out = [dict(id="dafeiyu", display="大肥鱼（内置）", kind="dafeiyu", path=None)]
+    out = [dict(id="dafeiyu", display=pet_i18n.t("大肥鱼（内置）"),
+                kind="dafeiyu", path=None)]
     seen = {"dafeiyu"}
     # Codex 精灵图契约
     for root, tag in [(skins_dir(), ""),
@@ -796,13 +800,13 @@ def render_card(snap: "Snapshot", detail: bool, privacy: bool = False) -> Image.
 
     # 隐私模式：标题换成「会话 N」，副行换成不含内容的通用文案
     def tlabel(idx: int, task) -> str:
-        return f"会话 {idx + 1}" if privacy else task.label
+        return pet_i18n.t("会话 ") + str(idx + 1) if privacy else task.label
 
     sub_text = GENERIC_DETAIL.get(snap.state, "") if privacy else snap.detail_line
 
     # ── 折叠态 & 多任务：标题 + 每个任务一行 ──
     if n_tasks > 1 and not detail:
-        head = f"{n_tasks} 个任务进行中"
+        head = f"{n_tasks} " + pet_i18n.t("个任务进行中")
         right = _fmt_ms(snap.elapsed_ms) if snap.elapsed_ms is not None else ""
         rw = d.textlength(right, font=f_main) if right else 0
         d.text((tx, dcy - 8 * s), _ellipsis(d, head, f_main, x1 - tx - rw - 12 * s),
@@ -816,15 +820,16 @@ def render_card(snap: "Snapshot", detail: bool, privacy: bool = False) -> Image.
         return img.resize((WIN_W, ch), Image.LANCZOS)
 
     # ── 单任务折叠态 / 详情态标题 ──
-    label = pal["label"]
+    # PALETTE 里的 label 是中文原文（它同时是翻译表的 key），显示前过一道 t()
+    label = pet_i18n.t(pal["label"])
     if n_tasks > 1:
-        label = f"{n_tasks} 个任务进行中"
+        label = f"{n_tasks} " + pet_i18n.t("个任务进行中")
     elif snap.state == "tools" and snap.tool_names:
-        label = f"执行 {snap.tool_names[0]}"
+        label = pet_i18n.t("执行 ") + str(snap.tool_names[0])
     elif snap.state == "idle" and snap.idle_hint:
         label = snap.idle_hint
     elif snap.state == "offline":
-        label = "未发现 DSH 会话"
+        label = pet_i18n.t("未发现 DSH 会话")
 
     right = _fmt_ms(snap.elapsed_ms) if snap.elapsed_ms is not None else ""
     rw = d.textlength(right, font=f_main) if right else 0
@@ -849,7 +854,8 @@ def render_card(snap: "Snapshot", detail: bool, privacy: bool = False) -> Image.
             _task_row(d, s, x0, x1, row_y, t, f_small, label=tlabel(i, t))
             row_y += 16 * s
         if n_tasks > len(shown):
-            d.text((x0 + 26 * s, row_y), f"… 另有 {n_tasks - len(shown)} 个任务",
+            d.text((x0 + 26 * s, row_y),
+                   pet_i18n.t("… 另有 ") + f"{n_tasks - len(shown)} " + pet_i18n.t("个任务"),
                    font=f_small, fill=TEXT_DIM)
             row_y += 16 * s
     elif sub_text:
@@ -862,9 +868,14 @@ def render_card(snap: "Snapshot", detail: bool, privacy: bool = False) -> Image.
     row_y += 9 * s
 
     rows = [
-        ("模型", f"{snap.model}" + (f" · {snap.provider}" if snap.provider else "")),
-        ("进度", f"第 {snap.turn} 轮 · 第 {snap.step} 步" if snap.turn else "—"),
-        ("输出", f"{snap.tokens_out/1000:.1f}K tokens · 上下文 {snap.context_pct:.0f}%"),
+        (pet_i18n.t("模型"),
+         f"{snap.model}" + (f" · {snap.provider}" if snap.provider else "")),
+        (pet_i18n.t("进度"),
+         pet_i18n.t("第 ") + f"{snap.turn}" + pet_i18n.t(" 轮 · 第 ")
+         + f"{snap.step}" + pet_i18n.t(" 步") if snap.turn else "—"),
+        (pet_i18n.t("输出"),
+         f"{snap.tokens_out/1000:.1f}K tokens · " + pet_i18n.t("上下文 ")
+         + f"{snap.context_pct:.0f}%"),
     ]
     for k, v in rows:
         d.text((tx, row_y), k, font=f_small, fill=TEXT_DIM)
@@ -885,7 +896,7 @@ def render_card(snap: "Snapshot", detail: bool, privacy: bool = False) -> Image.
     # 最慢的几个工具（来自事件日志的 tool/call → tool/result 计时）
     if snap.slow_tools:
         row_y = bar_y + 10 * s
-        d.text((tx, row_y), "最慢", font=f_small, fill=TEXT_DIM)
+        d.text((tx, row_y), pet_i18n.t("最慢"), font=f_small, fill=TEXT_DIM)
         row_y += 13 * s
         for name, ms in snap.slow_tools[:3]:
             d.text((tx + 8 * s, row_y), _ellipsis(d, name, f_small, 60 * s),

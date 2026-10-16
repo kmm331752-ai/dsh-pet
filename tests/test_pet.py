@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -28,6 +30,7 @@ import dsh_pet as P  # noqa: E402
 import pet_accessories as A  # noqa: E402
 import pet_base as B  # noqa: E402
 import pet_chat as C  # noqa: E402
+import pet_i18n as I  # noqa: E402
 import pet_sources as S  # noqa: E402
 
 
@@ -321,7 +324,9 @@ class TestSourceSanity(unittest.TestCase):
         桌宠每次启动都崩。更糟的是当时同时有端口锁冲突，报错被盖住，
         我误以为只是锁的问题就放过了。
         """
-        used = set(self.re.findall(r"add_cascade\([^)]*menu=self\.(\w+_menu)", self.src))
+        # menu=self._x_menu 前面可能有 t("...") 这种带括号的东西，
+        # 所以不能用 [^)]* 卡（会被 t("皮肤") 的右括号截断）。
+        used = set(self.re.findall(r"add_cascade\(.*?menu=self\.(\w+_menu)", self.src))
         made = set(self.re.findall(r"self\.(\w+_menu)\s*=\s*self\.tk\.Menu", self.src))
         self.assertTrue(used, "一个 cascade 菜单都没找到，检查方式可能失效了")
         self.assertEqual(used - made, set(),
@@ -867,6 +872,126 @@ class TestChat(unittest.TestCase):
                 with self.assertRaises(C.ChatError) as cm:
                     cli.ask(text)
                 self.assertIn(want, str(cm.exception))
+
+
+class TestI18n(unittest.TestCase):
+    """多语言。以中文原文当 key —— 所以「表里的 key 在源码里存在」
+    和「源码里 t() 包住的都有翻译」这两个方向都要查。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import glob
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cls.root = root
+        cls.sources = {}
+        for path in glob.glob(os.path.join(root, "*.py")):
+            name = os.path.basename(path)
+            if name == "pet_i18n.py":
+                continue
+            with open(path, encoding="utf-8") as fh:
+                cls.sources[name] = fh.read()
+
+    def tearDown(self):
+        I.set_language("zh")                             # 别把语言漏给别的测试
+
+    def test_language_switch(self):
+        I.set_language("zh")
+        self.assertEqual(I.t("设置…"), "设置…")
+        self.assertEqual(I.t("嘿嘿"), "嘿嘿")
+        I.set_language("en")
+        self.assertEqual(I.t("设置…"), "Settings…")
+        self.assertEqual(I.t("嘿嘿"), "Hehe")
+        self.assertEqual(I.t("执行中"), "Working")
+
+    def test_missing_translation_falls_back_to_chinese(self):
+        """没翻译的退回原文，不能变空白或漏出 key 名。"""
+        I.set_language("en")
+        self.assertEqual(I.t("这句没翻译"), "这句没翻译")
+        self.assertEqual(I.t(""), "")
+
+    def test_resolve_never_returns_auto(self):
+        for pref in ("auto", "zh", "en", "", "klingon", None):
+            with self.subTest(pref=pref):
+                self.assertIn(I.resolve(pref), ("zh", "en"))
+
+    def test_t_lines(self):
+        I.set_language("en")
+        self.assertEqual(I.t_lines(["嘿嘿", "好吃！"]), ["Hehe", "Tasty!"])
+        I.set_language("zh")
+        self.assertEqual(I.t_lines(["嘿嘿"]), ["嘿嘿"])
+
+    @staticmethod
+    def _flat(text: str) -> str:
+        """比对用：去掉所有空白，并把源码里的 \\n 转义也当空白去掉。
+
+        源码里写的是 "...\\n滚轮..."（字面量反斜杠 n），而翻译表的 key 里
+        是**真的换行**。不归一的话两边永远对不上。
+        """
+        return re.sub(r"\s+", "", text.replace("\\n", ""))
+
+    def test_every_translation_key_exists_in_source(self):
+        """翻译表里的 key 必须在源码里出现 —— 否则是改文案时留下的孤儿。
+
+        孤儿 key 本身不报错（t() 查不到就用原文），但它是**漏翻的信号**：
+        说明有句话被改过，英文还停在旧版本。
+        """
+        blob = "\n".join(self.sources.values())
+        flat = self._flat(blob)
+        orphans = [k for k in I.EN if k not in blob and self._flat(k) not in flat]
+        self.assertEqual(orphans, [], f"翻译表里的孤儿 key：{orphans}")
+
+    def test_every_t_call_has_a_translation(self):
+        """源码里 t() 包住的中文都要有英文。
+
+        正则要小心：`print("x")` 的尾巴也长得像 `t("x")`，
+        所以要加个前置断言（不能是标识符的一部分）。
+        """
+        missing = []
+        for name, src in self.sources.items():
+            for m in re.finditer(r'(?<![A-Za-z_])t\("((?:[^"\\]|\\.)*)"\)', src):
+                text = m.group(1)
+                if not re.search(r"[\u4e00-\u9fff]", text):
+                    continue                             # 纯英文/符号不用翻
+                # 源码里是 \n 转义，表里是真换行 —— 两边都归一再看
+                if text in I.EN or self._flat(text) in {self._flat(k) for k in I.EN}:
+                    continue
+                missing.append(f"{name}: {text[:40]}")
+        self.assertEqual(missing, [], f"这些 t() 没有英文翻译：{missing}")
+
+    def test_state_labels_are_translated(self):
+        """PALETTE 的 label 是中文原文，显示前要过 t()。"""
+        I.set_language("en")
+        for st in P.STATE_ORDER:
+            label = P.PALETTE[st]["label"]
+            with self.subTest(state=st):
+                self.assertNotEqual(I.t(label), label,
+                                    f"{st} 的状态标签没翻译：{label}")
+
+    def test_line_tables_are_translated(self):
+        """台词表里每一句都要有英文。"""
+        I.set_language("en")
+        missing = []
+        for key, pool in P.LINES.items():
+            for line in pool:
+                if line not in I.EN:
+                    missing.append(f"{key}: {line}")
+        self.assertEqual(missing, [], f"这些台词没翻译：{missing[:6]}")
+
+    def test_language_pref_persists(self):
+        tmp = tempfile.mkdtemp(prefix="dsh-pet-i18n-")
+        orig = B.data_dir
+        B.data_dir = lambda: tmp
+        try:
+            c = S.CompanionSource()
+            c.save()
+            # 直接写配置再读回来
+            with open(os.path.join(tmp, "pet_config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"lang": "en"}, fh)
+            with open(os.path.join(tmp, "pet_config.json"), encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["lang"], "en")
+        finally:
+            B.data_dir = orig
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestConfig(unittest.TestCase):

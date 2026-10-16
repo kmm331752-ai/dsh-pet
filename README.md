@@ -277,6 +277,24 @@ System DPI 感知，再不行就不声明（模糊但能用）。
 
 想换人设改 `pet_chat.py` 里的 `PERSONA`。
 
+## 🌐 语言 / Language
+
+右键 → 设置 → **语言**，三选一：**跟随系统 / 中文 / English**。
+
+![中英对照](preview/i18n.png)
+
+`跟随系统` 按 Windows 的界面语言判断（中文系统用中文，其余用英文）。
+
+**界面、状态标签、台词、信息卡全部翻译** —— 只有你的任务标题保持原样
+（那是你的数据，不该翻）。
+
+想加第三种语言：在 `pet_i18n.py` 的 `EN` 旁边加一个表，再把 `LANGS`
+和 `LANG_LABELS` 补上就行。翻译表**以中文原文为 key**，所以不用为了
+翻译去改源码里的字面量；没翻到的句子自动退回中文，不会出现空白。
+
+有两条测试守着完整性：翻译表里不能有源码里不存在的孤儿 key，
+源码里 `t()` 包住的每一句也都要有翻译。
+
 ## 🏃 她会自己做什么
 
 | 动作 | 什么时候 |
@@ -477,6 +495,7 @@ Calico 不受影响 —— 它只有 idle 用 SVG，而且是眼球追踪用的 
 | `pet_skin_install.py` | 皮肤安装（下载 / 解压 / 校验 / 回滚） |
 | `pet_accessories.py` | 配饰：程序绘制的帽子围巾等独立图层 |
 | `pet_chat.py` | 本地对话：OpenAI 兼容客户端 |
+| `pet_i18n.py` | 多语言：以中文原文为 key 的翻译表 |
 | `build_exe.py` | 打包脚本，产出 `dist/DSH-Pet.exe` |
 | `installer.iss` | Inno Setup 安装包脚本（`iscc installer.iss`） |
 | `tests/` | 回归测试，`python tests/test_pet.py` 直接跑 |

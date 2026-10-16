@@ -1,4 +1,4 @@
-"""DSH 桌面宠物 —— 主程序。
+﻿"""DSH 桌面宠物 —— 主程序。
 
 拆出来的模块：
     pet_base      路径、常量、Win32 分层窗口、字体、几何、出错日志
@@ -35,6 +35,7 @@ from pet_types import Snapshot, TaskInfo
 
 import pet_accessories
 import pet_chat
+from pet_i18n import t
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -96,6 +97,9 @@ class PetApp:
         self.chat_url = str(self.cfg.get("chat_url", "") or "")
         self.chat_model = str(self.cfg.get("chat_model", "") or "")
         self.chat = pet_chat.ChatClient(self.chat_url, self.chat_model)
+        # 语言。auto 按 Windows 界面语言解析，所以这里存偏好、算具体值。
+        self.lang_pref = str(self.cfg.get("lang", "auto") or "auto")
+        self.lang = pet_i18n.set_language(self.lang_pref)
         self.frame_i = 0
         self.snap = Snapshot(state=args.force_state or "idle")
         self._card_cache = (None, None)
@@ -163,6 +167,7 @@ class PetApp:
         cfg["accessory"] = self.accessory
         cfg["chat_url"] = self.chat_url
         cfg["chat_model"] = self.chat_model
+        cfg["lang"] = self.lang_pref
         try:
             with open(config_path(), "w", encoding="utf-8") as fh:
                 json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -223,47 +228,66 @@ class PetApp:
         r.bind("<MouseWheel>", self._on_wheel)            # 滚轮缩放
         r.bind("<Double-Button-1>", self._on_double)      # 双击开设置
 
+        self._build_menu()
+
+    def _build_menu(self) -> None:
+        """建右键菜单。抽出来是为了切语言时能整个重建 ——
+        Tk 的菜单项文字建完就改不了（entryconfigure 能改 label，
+        但级联子菜单和 radiobutton 的变量要一起重做，不如重建干净）。
+        """
+        r = self.root
+        if getattr(self, "menu", None) is not None:
+            try:
+                self.menu.destroy()
+            except Exception:                            # noqa: BLE001
+                pass
         self.menu = self.tk.Menu(r, tearoff=0)
-        self.menu.add_command(label="喂一口 🍡", command=self._feed)
-        self.menu.add_command(label="展开/收起详情", command=self._toggle_detail)
+        self.menu.add_command(label=t("喂一口") + " 🍡", command=self._feed)
+        self.menu.add_command(label=t("展开详情") + "/" + t("收起详情"), command=self._toggle_detail)
         self.menu.add_separator()
-        self.menu.add_command(label="自动跟随活跃会话", command=self._follow_auto)
-        self.menu.add_command(label="复制会话 ID", command=self._copy_sid)
+        self.menu.add_command(label=t("自动跟随活跃会话"), command=self._follow_auto)
+        self.menu.add_command(label=t("复制会话 ID"), command=self._copy_sid)
         self.menu.add_separator()
         self.var_privacy = self.tk.BooleanVar(value=self.privacy)
         self.var_sound = self.tk.BooleanVar(value=self.sound)
         self.var_companion = self.tk.BooleanVar(
             value=self.companion is not None and bool(self.cfg.get("companion", True)))
-        self.menu.add_checkbutton(label="隐私模式（隐藏标题与提示词）",
+        self.menu.add_checkbutton(label=t("隐私模式（隐藏标题与提示词）"),
                                   variable=self.var_privacy, command=self._toggle_privacy)
-        self.menu.add_checkbutton(label="任务完成时提示音",
+        self.menu.add_checkbutton(label=t("任务完成时提示音"),
                                   variable=self.var_sound, command=self._toggle_sound)
-        self.menu.add_checkbutton(label="陪伴模式（没任务时自己过日子）",
+        self.menu.add_checkbutton(label=t("陪伴模式（没任务时自己过日子）"),
                                   variable=self.var_companion, command=self._toggle_companion)
         self.var_focus = self.tk.BooleanVar(value=self.focus_mode)
-        self.menu.add_checkbutton(label="专注模式（安静待机不打扰）",
+        self.menu.add_checkbutton(label=t("专注模式（安静待机不打扰）"),
                                   variable=self.var_focus, command=self._toggle_focus)
         self.menu.add_separator()
         self._pomo_menu = self.tk.Menu(self.menu, tearoff=0)
         for mins in POMODORO_CHOICES:
-            self._pomo_menu.add_command(label=f"{mins} 分钟",
+            self._pomo_menu.add_command(label=f"{mins} {t('分钟')}",
                                         command=lambda m=mins: self._start_pomodoro(m))
         self._pomo_menu.add_separator()
-        self._pomo_menu.add_command(label="取消计时", command=self._cancel_pomodoro)
-        self.menu.add_cascade(label="番茄钟 🍅", menu=self._pomo_menu)
+        self._pomo_menu.add_command(label=t("取消计时"), command=self._cancel_pomodoro)
+        self.menu.add_cascade(label=t("番茄钟") + " 🍅", menu=self._pomo_menu)
         self.menu.add_separator()
         self._skin_menu = self.tk.Menu(self.menu, tearoff=0)
-        self.menu.add_cascade(label="皮肤", menu=self._skin_menu)
+        self.menu.add_cascade(label=t("皮肤"), menu=self._skin_menu)
         self._rebuild_skin_menu()
         self._acc_menu = self.tk.Menu(self.menu, tearoff=0)
-        self.menu.add_cascade(label="配饰", menu=self._acc_menu)
+        self.menu.add_cascade(label=t("配饰"), menu=self._acc_menu)
         self._rebuild_acc_menu()
         self.menu.add_separator()
-        self.menu.add_command(label="设置…", command=self._open_settings)
-        self.menu.add_command(label="和大肥鱼说话…", command=self._open_chat)
-        self.menu.add_command(label="导出相处记录…", command=self._export_record)
-        self.menu.add_command(label="检查更新…", command=self._check_update_async)
-        self.menu.add_command(label="退出", command=self._quit)
+        self.menu.add_command(label=t("设置…"), command=self._open_settings)
+        self.menu.add_command(label=t("和大肥鱼说话…"), command=self._open_chat)
+        self.menu.add_command(label=t("导出相处记录…"), command=self._export_record)
+        self.menu.add_command(label=t("检查更新…"), command=self._check_update_async)
+        self.menu.add_command(label=t("退出"), command=self._quit)
+
+    def _rebuild_menus(self) -> None:
+        """切语言后重建菜单。"""
+        self._build_menu()
+        self._rebuild_skin_menu()
+        self._rebuild_acc_menu()
 
     def _rebuild_skin_menu(self) -> None:
         self._skin_menu.delete(0, "end")
@@ -273,23 +297,23 @@ class PetApp:
                 label=s["display"], value=s["id"], variable=self.var_skin,
                 command=lambda sid=s["id"]: self._switch_skin(sid))
         self._skin_menu.add_separator()
-        self._skin_menu.add_command(label="从链接安装…", command=self._install_skin_dialog)
-        self._skin_menu.add_command(label="删除皮肤…", command=self._remove_skin_dialog)
+        self._skin_menu.add_command(label=t("从链接安装…"), command=self._install_skin_dialog)
+        self._skin_menu.add_command(label=t("删除皮肤…"), command=self._remove_skin_dialog)
 
     # -- 皮肤安装 / 删除 ---------------------------------------------------
     def _install_skin_dialog(self) -> None:
         """要一个链接或本地路径，后台装，装完刷新菜单。"""
         tk = self.tk
         win = tk.Toplevel(self.root)
-        win.title("安装皮肤")
+        win.title(t("安装皮肤"))
         win.geometry("520x190")
         win.attributes("-topmost", True)
-        tk.Label(win, text="皮肤压缩包链接，或本地文件路径：",
+        tk.Label(win, text=t("皮肤压缩包链接，或本地文件路径："),
                  anchor="w").pack(fill="x", padx=14, pady=(14, 4))
         entry = tk.Entry(win)
         entry.pack(fill="x", padx=14)
         entry.focus_set()
-        tk.Label(win, text="支持 zip；里面要有 theme.json 或 spritesheet.png / spritesheet.webp",
+        tk.Label(win, text=t("支持 zip；里面要有 theme.json 或 spritesheet.png / spritesheet.webp"),
                  anchor="w", fg="#888").pack(fill="x", padx=14, pady=(4, 0))
         status = tk.Label(win, text="", anchor="w", wraplength=480, justify="left")
         status.pack(fill="x", padx=14, pady=(8, 0))
@@ -297,9 +321,9 @@ class PetApp:
         def go():
             src = entry.get().strip().strip('"')
             if not src:
-                status.configure(text="先填个链接或路径")
+                status.configure(text=t("先填个链接或路径"))
                 return
-            status.configure(text="正在下载安装…")
+            status.configure(text=t("正在下载安装…"))
             win.update_idletasks()
 
             def work():
@@ -315,8 +339,8 @@ class PetApp:
 
         bar = tk.Frame(win)
         bar.pack(fill="x", padx=14, pady=(10, 12))
-        tk.Button(bar, text="安装", command=go).pack(side="right")
-        tk.Button(bar, text="取消", command=win.destroy).pack(side="right", padx=6)
+        tk.Button(bar, text=t("安装"), command=go).pack(side="right")
+        tk.Button(bar, text=t("取消"), command=win.destroy).pack(side="right", padx=6)
         entry.bind("<Return>", lambda _e: go())
 
     def _remove_skin_dialog(self) -> None:
@@ -325,13 +349,13 @@ class PetApp:
         import pet_skin_install
         removable = [s for s in discover_skins() if s["id"] not in pet_skin_install.BUILTIN]
         if not removable:
-            self._say("没有可删的皮肤", 2.5)
+            self._say(t("没有可删的皮肤"), 2.5)
             return
         win = tk.Toplevel(self.root)
-        win.title("删除皮肤")
+        win.title(t("删除皮肤"))
         win.geometry("360x300")
         win.attributes("-topmost", True)
-        tk.Label(win, text="选一套删掉（内置皮肤不在列表里）：",
+        tk.Label(win, text=t("选一套删掉（内置皮肤不在列表里）："),
                  anchor="w").pack(fill="x", padx=14, pady=(14, 6))
         box = tk.Listbox(win)
         box.pack(fill="both", expand=True, padx=14)
@@ -349,15 +373,15 @@ class PetApp:
                     self._switch_skin("dafeiyu")          # 删的是当前用的，换回内置
                 self._rebuild_skin_menu()
                 win.destroy()
-                self._say("删掉了", 2.5)
+                self._say(t("删掉了"), 2.5)
             except Exception as exc:                     # noqa: BLE001
                 log_error("删除皮肤失败", exc)
                 tk.Label(win, text=str(exc), fg="#c33").pack(padx=14)
 
         bar = tk.Frame(win)
         bar.pack(fill="x", padx=14, pady=(8, 12))
-        tk.Button(bar, text="删除", command=do).pack(side="right")
-        tk.Button(bar, text="取消", command=win.destroy).pack(side="right", padx=6)
+        tk.Button(bar, text=t("删除"), command=do).pack(side="right")
+        tk.Button(bar, text=t("取消"), command=win.destroy).pack(side="right", padx=6)
 
     def _rebuild_acc_menu(self) -> None:
         self._acc_menu.delete(0, "end")
@@ -415,7 +439,7 @@ class PetApp:
 
         win = tk.Toplevel(self.root)
         self._settings_win = win
-        win.title("DSH 桌宠 · 设置")
+        win.title(t("DSH 桌宠 · 设置"))
         win.resizable(False, False)
         win.attributes("-topmost", True)
         # 这些参数是给 grid() 的 —— 左对齐要写 sticky，不是 anchor。
@@ -424,7 +448,7 @@ class PetApp:
         pad = dict(padx=14, pady=6, sticky="w")
 
         row = 0
-        tk.Label(win, text="行为", font=("Microsoft YaHei UI", 10, "bold")).grid(
+        tk.Label(win, text=t("行为"), font=("Microsoft YaHei UI", 10, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 2))
         row += 1
 
@@ -449,25 +473,47 @@ class PetApp:
             ok = set_autostart(v_auto.get())
             if not ok:
                 v_auto.set(autostart_enabled())
-                status.config(text="设置开机自启失败（见控制台）", fg="#B93B37")
+                status.config(text=t("设置开机自启失败（见控制台）"), fg="#B93B37")
 
-        tk.Checkbutton(win, text="陪伴模式（DSH 没任务时自己过日子）", variable=v_comp,
+        tk.Checkbutton(win, text=t("陪伴模式（DSH 没任务时自己过日子）"), variable=v_comp,
                        command=apply_companion).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
-        tk.Checkbutton(win, text="开机自启", variable=v_auto,
+        tk.Checkbutton(win, text=t("开机自启"), variable=v_auto,
                        command=apply_auto).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
-        tk.Checkbutton(win, text="隐私模式（隐藏标题与提示词）", variable=v_priv,
+        tk.Checkbutton(win, text=t("隐私模式（隐藏标题与提示词）"), variable=v_priv,
                        command=apply_priv).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
-        tk.Checkbutton(win, text="任务完成时提示音", variable=v_sound,
+        tk.Checkbutton(win, text=t("任务完成时提示音"), variable=v_sound,
                        command=apply_sound).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
+
+        # 语言。切换后要重建界面才生效 —— Tk 的菜单文字改不了，
+        # 只能重建菜单；设置窗口自己重建一次即可。
+        lang_row = tk.Frame(win)
+        lang_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=6)
+        tk.Label(lang_row, text=t("语言")).pack(side="left")
+        v_lang = tk.StringVar(value=self.lang_pref)
+
+        def apply_lang(*_a):
+            self.lang_pref = v_lang.get()
+            self.lang = pet_i18n.set_language(self.lang_pref)
+            self._save_config()
+            self._rebuild_menus()
+            # 设置窗口自己重建（不然标签还是旧语言）
+            win.destroy()
+            self._settings_win = None
+            self._open_settings()
+
+        om_lang = tk.OptionMenu(lang_row, v_lang, *pet_i18n.LANGS,
+                                command=apply_lang)
+        om_lang.pack(side="left", padx=(6, 0))
         row += 1
 
         tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
                                                 sticky="ew", padx=14, pady=8)
         row += 1
-        tk.Label(win, text="皮肤", font=("Microsoft YaHei UI", 10, "bold")).grid(
+        tk.Label(win, text=t("皮肤"), font=("Microsoft YaHei UI", 10, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
         row += 1
 
@@ -481,20 +527,20 @@ class PetApp:
         tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
                                                 sticky="ew", padx=14, pady=8)
         row += 1
-        tk.Label(win, text="本地对话（可选）", font=("Microsoft YaHei UI", 10, "bold")).grid(
+        tk.Label(win, text=t("本地对话（可选）"), font=("Microsoft YaHei UI", 10, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 2))
         row += 1
 
         v_url = tk.StringVar(value=self.chat_url)
         v_model = tk.StringVar(value=self.chat_model)
-        tk.Label(win, text="地址（Ollama 默认 http://127.0.0.1:11434）",
+        tk.Label(win, text=t("地址（Ollama 默认 http://127.0.0.1:11434）"),
                  anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
                                              sticky="w", padx=14)
         row += 1
         tk.Entry(win, textvariable=v_url, width=34).grid(
             row=row, column=0, columnspan=2, sticky="ew", padx=14)
         row += 1
-        tk.Label(win, text="模型名（Ollama 用 ollama list 看）",
+        tk.Label(win, text=t("模型名（Ollama 用 ollama list 看）"),
                  anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
                                              sticky="w", padx=14, pady=(4, 0))
         row += 1
@@ -514,18 +560,18 @@ class PetApp:
             self.chat.model = self.chat_model
             self._save_config()
             if not self.chat.configured:
-                chat_status.configure(text="填完地址和模型才能用", fg="#B93B37")
+                chat_status.configure(text=t("填完地址和模型才能用"), fg="#B93B37")
             else:
                 chat_status.configure(
-                    text=f"已保存：{self.chat.model} @ {self.chat.base}", fg="#2E9E63")
+                    text=t("已保存：") + f"{self.chat.model} @ {self.chat.base}", fg="#2E9E63")
 
         def probe():
             """探一下端点，顺便把模型名列出来。"""
             url = v_url.get().strip()
             if not url:
-                chat_status.configure(text="先填地址", fg="#B93B37")
+                chat_status.configure(text=t("先填地址"), fg="#B93B37")
                 return
-            chat_status.configure(text="正在连…", fg="#666")
+            chat_status.configure(text=t("正在连…"), fg="#666")
             win.update_idletasks()
 
             def work():
@@ -543,16 +589,16 @@ class PetApp:
 
         chatbar = tk.Frame(win)
         chatbar.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
-        tk.Button(chatbar, text="保存", command=save_chat).pack(side="left")
-        tk.Button(chatbar, text="测试连接", command=probe).pack(side="left", padx=6)
-        tk.Button(chatbar, text="和大肥鱼说话…",
+        tk.Button(chatbar, text=t("保存"), command=save_chat).pack(side="left")
+        tk.Button(chatbar, text=t("测试连接"), command=probe).pack(side="left", padx=6)
+        tk.Button(chatbar, text=t("和大肥鱼说话…"),
                   command=self._open_chat).pack(side="left")
         row += 1
 
         tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
                                                 sticky="ew", padx=14, pady=8)
         row += 1
-        tk.Label(win, text="相处记录", font=("Microsoft YaHei UI", 10, "bold")).grid(
+        tk.Label(win, text=t("相处记录"), font=("Microsoft YaHei UI", 10, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
         row += 1
 
@@ -569,7 +615,7 @@ class PetApp:
             dx, dy = default_position()
             self.root.geometry(f"{WIN_W}x{WIN_H}+{dx}+{dy}")
             self._save_config()
-            status.config(text="位置已复位", fg="#2E9E63")
+            status.config(text=t("位置已复位"), fg="#2E9E63")
 
         def forget_me():
             if self.companion is not None:
@@ -582,20 +628,19 @@ class PetApp:
 
         btns = tk.Frame(win)
         btns.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 6))
-        tk.Button(btns, text="位置复位", command=reset_pos).pack(side="left")
-        tk.Button(btns, text="重置相处记录", command=forget_me).pack(side="left", padx=6)
-        tk.Button(btns, text="出错日志", command=self._show_error_log).pack(side="left")
+        tk.Button(btns, text=t("位置复位"), command=reset_pos).pack(side="left")
+        tk.Button(btns, text=t("重置相处记录"), command=forget_me).pack(side="left", padx=6)
+        tk.Button(btns, text=t("出错日志"), command=self._show_error_log).pack(side="left")
         row += 1
 
         status = tk.Label(win, text="", fg="#666")
         status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
         row += 1
-        tk.Label(win, text="热键：Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置\n"
-                           "滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜",
+        tk.Label(win, text=t("热键：Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置\n滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜"),
                  justify="left", fg="#777").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 0))
         row += 1
-        tk.Button(win, text="关闭", width=10, command=lambda: (
+        tk.Button(win, text=t("关闭"), width=10, command=lambda: (
             win.destroy(), setattr(self, "_settings_win", None))).grid(
             row=row, column=0, columnspan=2, pady=(6, 14))
 
@@ -616,16 +661,16 @@ class PetApp:
         try:
             import pystray
             menu = pystray.Menu(
-                pystray.MenuItem("显示 / 隐藏桌宠",
+                pystray.MenuItem(t("显示 / 隐藏桌宠"),
                                  lambda: self._tray_actions.append("toggle"), default=True),
-                pystray.MenuItem("展开 / 收起详情",
+                pystray.MenuItem(t("展开 / 收起详情"),
                                  lambda: self._tray_actions.append("detail")),
-                pystray.MenuItem("隐私模式", lambda: self._tray_actions.append("privacy"),
+                pystray.MenuItem(t("隐私模式"), lambda: self._tray_actions.append("privacy"),
                                  checked=lambda _i: self.privacy),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("退出", lambda: self._tray_actions.append("quit")),
+                pystray.MenuItem(t("退出"), lambda: self._tray_actions.append("quit")),
             )
-            self.tray = pystray.Icon("dsh_pet", self._tray_image(), "DSH 桌宠", menu)
+            self.tray = pystray.Icon("dsh_pet", self._tray_image(), t("DSH 桌宠"), menu)
             # pystray 自带消息循环，放后台线程；菜单回调只投递动作，主线程执行
             threading.Thread(target=self.tray.run, daemon=True).start()
         except Exception as exc:                          # noqa: BLE001
@@ -690,29 +735,29 @@ class PetApp:
             elif isinstance(act, str) and act.startswith("update:"):
                 tag = act.split(":", 1)[1]
                 if self.companion is not None:
-                    self.companion.say(f"有新版本 {tag}", 6.0)
+                    self.companion.say(t("有新版本 ") + tag, 6.0)
                 print(f"[update] 有新版本 {tag} -> {RELEASES_URL}")
             elif isinstance(act, str) and act.startswith("skin-installed:"):
                 _tag, skin_id, msg = act.split(":", 2)
                 self._rebuild_skin_menu()
                 self._switch_skin(skin_id)               # 装完直接用上
-                self._say("装好了", 2.6)
+                self._say(t("装好了"), 2.6)
                 print(f"[skin] {msg}")
             elif isinstance(act, str) and act.startswith("skin-error:"):
-                self._say("装不上", 2.6)
+                self._say(t("装不上"), 2.6)
                 print(f"[skin] 安装失败：{act.split(':', 1)[1]}", file=sys.stderr)
             elif isinstance(act, str) and act.startswith("chat-probe-ok:"):
-                self._set_chat_status("连上了，但这个端点没报告任何模型", "#C97A22")
+                self._set_chat_status(t("连上了，但这个端点没报告任何模型"), "#C97A22")
             elif isinstance(act, str) and act.startswith("chat-models:"):
                 names = act.split(":", 1)[1]
-                self._set_chat_status(f"连上了。可用模型：{names}", "#2E9E63")
+                self._set_chat_status(t("连上了。可用模型：") + names, "#2E9E63")
                 # 只有一个模型且还没填，就顺手填上
                 if not self.chat_model and "," not in names:
                     self.chat_model = names
                     self.chat.model = names
                     self._save_config()
             elif isinstance(act, str) and act.startswith("chat-probe-fail:"):
-                self._set_chat_status(f"连不上：{act.split(':', 1)[1]}", "#B93B37")
+                self._set_chat_status(t("连不上：") + act.split(":", 1)[1], "#B93B37")
             elif isinstance(act, str) and act.startswith("chat-reply:"):
                 reply = act.split(":", 1)[1]
                 self._say(reply, max(5.0, min(14.0, len(reply) * 0.28)))
@@ -730,7 +775,7 @@ class PetApp:
                     except Exception:                    # noqa: BLE001
                         pass
             elif isinstance(act, str) and act.startswith("chat-error:"):
-                self._say("说不出来…", 3.0)
+                self._say(t("说不出来…"), 3.0)
                 w = getattr(self, "_chat_win", None)
                 if w is not None:
                     try:
@@ -781,7 +826,7 @@ class PetApp:
     def _cancel_pomodoro(self) -> None:
         self.pomo_until = 0.0
         if self.companion is not None:
-            self.companion.say("番茄钟取消了", 2.5)
+            self.companion.say(t("番茄钟取消了"), 2.5)
 
     # -- 相处记录导出 / 更新检查 -------------------------------------------
     def _export_record(self) -> None:
@@ -823,7 +868,7 @@ class PetApp:
             img.convert("RGB").save(out)
             print(f"[export] 相处记录 -> {out}")
             if self.companion is not None:
-                self.companion.say("记好啦", 2.5)
+                self.companion.say(t("记好啦"), 2.5)
         except Exception as exc:                         # noqa: BLE001
             log_error("导出相处记录失败", exc)
 
@@ -869,7 +914,7 @@ class PetApp:
 
         win = tk.Toplevel(self.root)
         self._chat_win = win
-        win.title("和大肥鱼说话")
+        win.title(t("和大肥鱼说话"))
         win.geometry("440x420")
         win.attributes("-topmost", True)
 
@@ -884,7 +929,7 @@ class PetApp:
         def put(who: str, text: str) -> None:
             log.configure(state="normal")
             tag = {"me": "me", "her": "her"}.get(who, "sys")
-            prefix = {"me": "我：", "her": "她："}.get(who, "")
+            prefix = {"me": t("我："), "her": t("她：")}.get(who, "")
             log.insert("end", f"{prefix}{text}\n\n", tag)
             log.see("end")
             log.configure(state="disabled")
@@ -902,11 +947,12 @@ class PetApp:
             entry.delete(0, "end")
             put("me", text)
             if not self.chat.configured:
-                put("sys", f"还没配本地模型。\n当前地址：{self.chat.base or '（空）'}\n"
-                           f"当前模型：{self.chat.model or '（空）'}\n"
-                           f"右键 → 设置 → 本地对话，填一个再试。")
+                put("sys", t("还没配本地模型。") + "\n" + t("当前地址：")
+                           + (self.chat.base or t("（空）")) + "\n"
+                           + t("当前模型：") + (self.chat.model or t("（空）")) + "\n"
+                           + t("右键 → 设置 → 本地对话，填一个再试。"))
                 return
-            put("sys", "…")
+            put("sys", t("…"))
             win.update_idletasks()
 
             def work():
@@ -920,40 +966,40 @@ class PetApp:
             threading.Thread(target=work, name="dsh-pet-chat", daemon=True).start()
 
         entry.bind("<Return>", send)
-        tk.Button(bar, text="说", width=6, command=send).pack(side="left", padx=(6, 0))
+        tk.Button(bar, text=t("说"), width=6, command=send).pack(side="left", padx=(6, 0))
 
         foot = tk.Frame(win)
         foot.pack(fill="x", padx=10, pady=(0, 10))
-        tk.Button(foot, text="清空对话",
+        tk.Button(foot, text=t("清空对话"),
                   command=lambda: (self.chat.reset(), log.configure(state="normal"),
                                    log.delete("1.0", "end"),
                                    log.configure(state="disabled"))).pack(side="left")
-        tk.Button(foot, text="关闭", command=lambda: (
+        tk.Button(foot, text=t("关闭"), command=lambda: (
             win.destroy(), setattr(self, "_chat_win", None))).pack(side="right")
 
         if self.chat.configured:
-            put("sys", f"用 {self.chat.model} @ {self.chat.base}")
+            put("sys", f"{self.chat.model} @ {self.chat.base}")
         else:
-            put("sys", "还没配本地模型 —— 右键 → 设置 → 本地对话。")
+            put("sys", t("还没配本地模型 —— 右键 → 设置 → 本地对话。"))
 
     def _show_error_log(self) -> None:
         tk = self.tk
         text = read_error_log(60)
         win = tk.Toplevel(self.root)
-        win.title("DSH 桌宠 · 出错日志")
+        win.title(t("DSH 桌宠 · 出错日志"))
         win.geometry("720x420")
         win.attributes("-topmost", True)
         body = (text if text.strip()
-                else f"没有出错记录。\n\n日志文件位置：\n{error_log_path()}")
+                else t("没有出错记录。") + f"\n\n{t('日志文件位置：')}\n{error_log_path()}")
         box = tk.Text(win, wrap="none", font=("Consolas", 9))
         box.insert("1.0", body)
         box.configure(state="disabled")
         box.pack(fill="both", expand=True, padx=8, pady=(8, 4))
         bar = tk.Frame(win)
         bar.pack(fill="x", padx=8, pady=(0, 8))
-        tk.Button(bar, text="清空日志", command=lambda: (
+        tk.Button(bar, text=t("清空日志"), command=lambda: (
             self._clear_error_log(), win.destroy())).pack(side="left")
-        tk.Button(bar, text="关闭", command=win.destroy).pack(side="right")
+        tk.Button(bar, text=t("关闭"), command=win.destroy).pack(side="right")
 
     @staticmethod
     def _clear_error_log() -> None:

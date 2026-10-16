@@ -16,7 +16,9 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
-from pet_base import *
+from pet_base import *          # noqa: F403
+
+import pet_i18n
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,15 +55,21 @@ class TaskInfo:
 
     @property
     def label(self) -> str:
-        return self.title or (self.session_id[:8] if self.session_id else "未命名会话")
+        return self.title or (self.session_id[:8] if self.session_id
+                              else pet_i18n.t("未命名会话"))
 
     @property
     def short_state(self) -> str:
+        """行尾的短状态。这些是显示文案，要过 t()。"""
         if self.state == "tools":
-            return f"执行 {self.tool_names[0]}" if self.tool_names else "执行中"
-        return {"thinking": "思考中", "waiting": "等你回答", "failed": "出错重试",
-                "celebrating": "已完成", "idle": "空闲",
-                "offline": "离线"}.get(self.state, self.state)
+            return (pet_i18n.t("执行 ") + str(self.tool_names[0])
+                    if self.tool_names else pet_i18n.t("执行中"))
+        table = {"thinking": "思考中", "waiting": "等你回答", "failed": "出错重试",
+                 "celebrating": "已完成", "idle": "空闲", "offline": "离线",
+                 "tools": "执行中"}
+        key = table.get(self.state)
+        # 认不出的状态原样显示（可能是新加的），别变成空白
+        return pet_i18n.t(key) if key else self.state
 
 
 @dataclass

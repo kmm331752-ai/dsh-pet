@@ -21,6 +21,8 @@ from pet_base import *
 from pet_types import Snapshot, TaskInfo, read_json
 # Mood 也定义在本模块（它属于陪伴行为），不额外从 pet_types 引
 
+import pet_i18n
+
 
 def list_session_files() -> list:
     """列出全部 projcache 会话文件（路径, mtime, 大小）。"""
@@ -384,7 +386,8 @@ class StatusWatcher:
         if self.pinned:
             infos = [i for i in infos if i["session_id"] == self.pinned]
         if not infos:
-            return Snapshot(state="offline", detail_line="未发现 DSH 会话")
+            return Snapshot(state="offline",
+                        detail_line=pet_i18n.t("未发现 DSH 会话"))
 
         celebrating = self._track_turns(infos)
 
@@ -424,30 +427,33 @@ class StatusWatcher:
             name = item["title"][:18]
             tools = item["tools"]
             if tools:
-                snap.detail_line = f"「{name}」跑完了 · {tools[0]}"
+                snap.detail_line = pet_i18n.t("「") + name + pet_i18n.t("」跑完了 · ") + str(tools[0])
             else:
-                snap.detail_line = f"「{name}」跑完了"
+                snap.detail_line = pet_i18n.t("「") + name + pet_i18n.t("」跑完了")
             snap.bubble = True
         elif state == "waiting":
-            snap.detail_line = "在等你回答"
+            snap.detail_line = pet_i18n.t("在等你回答")
         elif state == "failed":
-            snap.detail_line = "请求出错，正在重试"
+            snap.detail_line = pet_i18n.t("请求出错，正在重试")
         elif state == "celebrating":
-            snap.detail_line = "任务已完成"
+            snap.detail_line = pet_i18n.t("任务已完成")
         elif state == "tools":
             if len(active) > 1:
-                snap.detail_line = f"{len(active)} 个任务进行中"
+                snap.detail_line = f"{len(active)} " + pet_i18n.t("个任务进行中")
             elif len(primary.tool_names) > 1:
-                snap.detail_line = f"{len(primary.tool_names)} 个工具调用进行中"
+                snap.detail_line = f"{len(primary.tool_names)} " + pet_i18n.t("个工具调用进行中")
             else:
-                snap.detail_line = primary.prompt[:40] or "工具调用进行中"
+                snap.detail_line = primary.prompt[:40] or pet_i18n.t("工具调用进行中")
         elif state == "thinking":
-            snap.detail_line = primary.prompt[:44] if primary.prompt else "模型正在生成"
+            snap.detail_line = primary.prompt[:44] if primary.prompt \
+            else pet_i18n.t("模型正在生成")
         else:
             if self._idle_since is None:
                 self._idle_since = time.time()
-            snap.idle_hint = "空闲" if time.time() - self._idle_since < 90 else "空闲（睡着了）"
-            snap.detail_line = primary.title[:44] if primary.title else "等待你的下一条指令"
+            snap.idle_hint = pet_i18n.t("空闲") if time.time() - self._idle_since < 90 \
+            else pet_i18n.t("空闲（睡着了）")
+            snap.detail_line = primary.title[:44] if primary.title \
+            else pet_i18n.t("等待你的下一条指令")
         if state != "idle":
             self._idle_since = None
 
@@ -579,7 +585,7 @@ class Mood:
         ready = sum(1 for h in range(24)
                     if self.seen_slots[h] >= self.SCHEDULE_MIN_SAMPLES)
         if ready < 6:
-            return f"还在观察你的作息（{ready}/6 个时段攒够样本）"
+            return pet_i18n.t("还在观察你的作息（") + f"{ready}/6" + pet_i18n.t(" 个时段攒够样本）")
         blocks = []
         for h in range(24):
             r = self.active_ratio(h)
@@ -604,14 +610,14 @@ class Mood:
         """按亲密度给个说法，给气泡和详情卡用。"""
         a = self.affection
         if a >= 0.85:
-            return "特别黏你"
+            return pet_i18n.t("特别黏你")
         if a >= 0.65:
-            return "挺开心"
+            return pet_i18n.t("挺开心")
         if a >= 0.4:
-            return "还不错"
+            return pet_i18n.t("还不错")
         if a >= 0.2:
-            return "有点蔫"
-        return "好久没理我了"
+            return pet_i18n.t("有点蔫")
+        return pet_i18n.t("好久没理我了")
 
 
 class CompanionSource:
@@ -783,8 +789,8 @@ class CompanionSource:
         # ── 组装 Snapshot ──
         m = self.mood
         snap = Snapshot(state=self.state)
-        snap.idle_hint = PALETTE[self.state]["label"]
-        snap.title = f"陪你第 {m.days_together} 天"
+        snap.idle_hint = pet_i18n.t(PALETTE[self.state]["label"])
+        snap.title = pet_i18n.t("陪你第 ") + f"{m.days_together}" + pet_i18n.t(" 天")
         snap.detail_line = m.mood_label
         snap.tokens_out = float(m.pokes + m.drags + m.feeds)
         snap.phase = random.random()
@@ -859,7 +865,7 @@ class CompanionSource:
         if days >= 7 and m.unlocked < 7:
             m.unlocked = 7
             self.save()
-            self.say(f"我们认识 {days} 天啦", 5.0)
+            self.say(pet_i18n.t("我们认识 ") + f"{days}" + pet_i18n.t(" 天啦"), 5.0)
 
 
 # 陪伴模式的文案表。想改直接改这里。
@@ -921,6 +927,12 @@ LINES = load_lines()
 
 
 def say_line(key: str) -> str:
-    """随机取一句台词。表里没有这个键就返回空串（调用方自己兜底）。"""
+    """随机取一句台词。表里没有这个键就返回空串（调用方自己兜底）。
+
+    取出来过一道翻译 —— 中文环境是恒等操作，英文环境查表。
+    没翻到的句子原样返回中文，不会变成空白。
+    """
     pool = LINES.get(key) or []
-    return random.choice(pool) if pool else ""
+    if not pool:
+        return ""
+    return pet_i18n.t(random.choice(pool))
