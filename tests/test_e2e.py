@@ -168,26 +168,45 @@ class TestHealthReminderEndToEnd(E2EBase):
         })()
         return snap
 
+    def _patch_health(self, first=0, every=0, idle=1.0):
+        """把健康提醒的三个输入都钉死。
+
+        **idle_seconds 要同时 patch 两个模块** —— `dsh_pet` 里写的是
+        `from pet_sources import *`，那是**另一份引用**，patch
+        pet_sources.idle_seconds 对它无效。
+
+        踩过：只 patch 了 pet_sources，于是真实系统空闲时间说了算 ——
+        刚敲完命令时测试过，机器闲了 60 秒后就挂（idle > 60 会提前 return）。
+        典型的 flaky：本地怎么跑都是绿的，隔一会儿再跑就红。
+        """
+        return [
+            mock.patch.object(S, "HEALTH_FIRST", first),
+            mock.patch.object(S, "HEALTH_EVERY", every),
+            mock.patch.object(S, "idle_seconds", lambda: idle),
+            mock.patch.object(P, "idle_seconds", lambda: idle),
+        ]
+
     def test_fires_while_dsh_is_busy(self):
         app = self.make_app(force_state=None, no_companion=False)
         app.root.update()
         self.assertIsNotNone(app.watcher, "force_state=None 时应该有 watcher")
         self.assertIsNotNone(app.companion, "应该有 companion")
 
-        with mock.patch.object(S, "HEALTH_FIRST", 0), \
-             mock.patch.object(S, "HEALTH_EVERY", 0), \
-             mock.patch.object(S, "idle_seconds", lambda: 1.0):
-            for state in ("tools", "thinking", "waiting", "idle"):
-                with self.subTest(state=state):
-                    app.companion.sitting_since = 0
-                    app.companion.next_health = 0
-                    app.companion.bubble = ""
-                    app.companion.bubble_until = 0
-                    self._stub_watcher(app, state)
-                    app._poll()
-                    self.assertTrue(app.snap.bubble,
-                                    f"DSH 是 {state} 时没提醒（气泡没出现）")
-                    self.assertTrue(app.snap.detail_line)
+        patches = self._patch_health()
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        for state in ("tools", "thinking", "waiting", "idle"):
+            with self.subTest(state=state):
+                app.companion.sitting_since = 0
+                app.companion.next_health = 0
+                app.companion.bubble = ""
+                app.companion.bubble_until = 0
+                self._stub_watcher(app, state)
+                app._poll()
+                self.assertTrue(app.snap.bubble,
+                                f"DSH 是 {state} 时没提醒（气泡没出现）")
+                self.assertTrue(app.snap.detail_line)
 
     def test_busy_snapshot_still_keeps_its_own_text_without_a_bubble(self):
         """没有气泡时，忙碌状态的文案不能被改掉。"""
@@ -196,9 +215,27 @@ class TestHealthReminderEndToEnd(E2EBase):
         app.companion.bubble = ""
         app.companion.bubble_until = 0
         self._stub_watcher(app, "tools", detail_line="原来的文案")
-        with mock.patch.object(S, "idle_seconds", lambda: 1.0):
-            app._poll()
+        patches = self._patch_health(idle=1.0)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        app._poll()
         self.assertEqual(app.snap.detail_line, "原来的文案")
+
+    def test_quiet_when_the_machine_is_idle(self):
+        """人离开电脑（空闲很久）时不该提醒 —— 她可能在看手机。"""
+        app = self.make_app(force_state=None, no_companion=False)
+        app.root.update()
+        app.companion.sitting_since = 0
+        app.companion.next_health = 0
+        app.companion.bubble = ""
+        self._stub_watcher(app, "tools")
+        patches = self._patch_health(idle=S.HEALTH_BREAK + 60)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        app._poll()
+        self.assertFalse(app.snap.bubble, "人不在还提醒了")
 
 
 class TestLazyAttributes(E2EBase):
