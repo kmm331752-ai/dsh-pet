@@ -564,7 +564,9 @@ class ClawdThemeSkin:
     def __init__(self, path: str, name: str, display: str, target_h: int = 174):
         self.dir, self.name, self.display = path, name, display
         self.target_h = target_h
-        with open(os.path.join(path, "theme.json"), encoding="utf-8") as fh:
+        # utf-8-sig：主题包作者在 Windows 上用记事本编辑过的话会带 BOM，
+        # 用 utf-8 读会直接抛异常，整个主题就加载失败了
+        with open(os.path.join(path, "theme.json"), encoding="utf-8-sig") as fh:
             self.manifest = json.load(fh)
         self.states = self.manifest.get("states") or {}
         self._cache: dict = {}
@@ -693,7 +695,7 @@ def discover_skins() -> list:
             if not os.path.exists(p):
                 continue
             try:
-                with open(p, encoding="utf-8") as fh:
+                with open(p, encoding="utf-8-sig") as fh:
                     name = _localized_name(json.load(fh).get("name"), n)
             except Exception:                            # noqa: BLE001
                 name = n

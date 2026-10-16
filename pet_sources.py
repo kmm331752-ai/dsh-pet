@@ -648,7 +648,7 @@ class CompanionSource:
     # -- 持久化 -------------------------------------------------------------
     def _load(self) -> Mood:
         try:
-            with open(self.path, encoding="utf-8") as fh:
+            with open(self.path, encoding="utf-8-sig") as fh:
                 raw = json.load(fh)
         except Exception:                                # noqa: BLE001
             raw = {}
@@ -909,7 +909,7 @@ def load_lines() -> dict:
     """
     table = dict(_LINE_DEFAULTS)
     try:
-        with open(lines_path(), encoding="utf-8") as fh:
+        with open(lines_path(), encoding="utf-8-sig") as fh:
             raw = json.load(fh)
     except Exception:                                    # noqa: BLE001
         return table

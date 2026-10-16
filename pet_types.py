@@ -108,7 +108,7 @@ class Snapshot:
 
 def read_json(path: str) -> Optional[dict]:
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8-sig") as fh:
             return json.load(fh)
     except Exception:                                    # noqa: BLE001
         return None

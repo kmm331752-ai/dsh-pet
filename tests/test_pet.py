@@ -994,6 +994,155 @@ class TestI18n(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestBomTolerance(unittest.TestCase):
+    """带 BOM 的 json 也要能读。
+
+    用户会在记事本里改 pet_config.json / pet_lines.json / theme.json，
+    而记事本存「UTF-8」是**带 BOM** 的。用 encoding="utf-8" 读会直接抛
+    UnicodeDecodeError，而调用方一律 except 后返回默认值 —— 于是
+    **整份配置被静默重置**，用户只会觉得"我改的东西没生效"。
+
+    实测过：带 BOM 的 pet_mood.json 读出来 pokes=0（真值是 42）。
+    修法是读的时候用 utf-8-sig（它同时兼容有 BOM 和没 BOM）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-bom-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _write_bom(path: str, data: dict) -> None:
+        import io as _io
+        with _io.open(path, "w", encoding="utf-8-sig") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+
+    def test_mood_with_bom(self):
+        self._write_bom(B.mood_path(), {"affection": 0.9, "pokes": 42})
+        c = S.CompanionSource()
+        self.assertEqual(c.mood.pokes, 42, "带 BOM 的相处记录被丢弃了")
+        self.assertAlmostEqual(c.mood.affection, 0.9)
+
+    def test_lines_with_bom(self):
+        self._write_bom(B.lines_path(), {"PET_LINES": ["自定义台词"]})
+        table = S.load_lines()
+        self.assertEqual(table["PET_LINES"], ["自定义台词"],
+                         "带 BOM 的台词包被丢弃了")
+
+    def test_read_json_helper_with_bom(self):
+        path = os.path.join(self.tmp, "x.json")
+        self._write_bom(path, {"a": 1})
+        self.assertEqual(P.read_json(path), {"a": 1})
+
+    def test_plain_utf8_still_works(self):
+        """没 BOM 的也要照读 —— utf-8-sig 对两者都兼容。"""
+        with open(B.mood_path(), "w", encoding="utf-8") as fh:
+            json.dump({"pokes": 7}, fh)
+        self.assertEqual(S.CompanionSource().mood.pokes, 7)
+
+
+class TestAccessoryRendering(unittest.TestCase):
+    """配饰画在缓存帧上的行为。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-acc-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+        with open(B.config_path(), "w", encoding="utf-8") as fh:
+            json.dump({"accessory": "hat", "skin": "dafeiyu", "companion": False}, fh)
+        self._saved = sys.modules.pop("pystray", None)
+        sys.modules["pystray"] = None
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        sys.modules.pop("pystray", None)
+        if self._saved is not None:
+            sys.modules["pystray"] = self._saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _app(self):
+        import argparse
+        args = argparse.Namespace(
+            demo=True, force_state=None, session=None, shot=None, skin="dafeiyu",
+            list_skins=False, privacy=False, no_companion=True, no_hotkeys=True)
+        app = P.PetApp(args)
+        self.addCleanup(lambda: self._safe_quit(app))
+        app.root.update()
+        return app
+
+    @staticmethod
+    def _safe_quit(app):
+        try:
+            app._quit()
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def test_accessory_is_drawn(self):
+        app = self._app()
+        self.assertEqual(app.accessory, "hat")
+        app._tick()
+        # 戴帽子之后，屏幕上的画面和"不戴"的差别应该集中在头顶
+        from PIL import ImageChops
+        clean = P.render_pet("idle", 0.0)
+        with_hat = P.render_pet("idle", 0.0)
+        bb = A.character_box(with_hat)
+        A.draw_accessory(with_hat, "hat", (bb[0] + bb[2]) / 2, float(bb[1]),
+                         float(bb[3] - bb[1]), 1.0, 0.0)
+        diff = ImageChops.difference(clean.convert("RGB"),
+                                     with_hat.convert("RGB")).getbbox()
+        self.assertIsNotNone(diff, "帽子没画出来")
+
+    def test_does_not_mutate_the_sprite_cache(self):
+        """配饰不能烧进缓存帧。
+
+        frames 是皮肤的缓存，draw_accessory 是原地绘制。不 copy 的话：
+        · 关掉配饰帽子还在
+        · 换配饰会叠加
+        实测踩过 —— 这条守着它。
+
+        **要检查所有帧**，不能只看第 0 帧：_tick 画的是"当前帧"，
+        而当前帧是按动画时间算的（idx 一直在变）。第一版只比第 0 帧，
+        注入 bug 后照样通过 —— 假绿。
+        """
+        from PIL import ImageChops
+        app = self._app()
+        app._switch_accessory("none")
+        app._tick()
+        clean = [f.copy() for f in app.sprites["idle"]]
+
+        app._switch_accessory("hat")
+        for _ in range(12):                              # 跑满一轮动画，覆盖所有帧
+            app._tick()
+        dirty = []
+        for i, (a, b) in enumerate(zip(clean, app.sprites["idle"])):
+            if ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox():
+                dirty.append(i)
+        self.assertEqual(dirty, [], f"配饰画进了缓存帧 {dirty}（应该先 copy()）")
+
+    def test_switching_off_leaves_cache_clean(self):
+        from PIL import ImageChops
+        app = self._app()
+        app._switch_accessory("none")
+        app._tick()
+        clean = [f.copy() for f in app.sprites["idle"]]
+        for aid in ("hat", "scarf", "crown"):
+            app._switch_accessory(aid)
+            for _ in range(6):
+                app._tick()
+        app._switch_accessory("none")
+        for _ in range(6):
+            app._tick()
+        dirty = []
+        for i, (a, b) in enumerate(zip(clean, app.sprites["idle"])):
+            if ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox():
+                dirty.append(i)
+        self.assertEqual(dirty, [], f"换了几轮配饰后缓存被污染：帧 {dirty}")
+
+
 class TestConfig(unittest.TestCase):
     def test_paths_are_absolute(self):
         for p in (B.config_path(), B.mood_path(), B.error_log_path(),

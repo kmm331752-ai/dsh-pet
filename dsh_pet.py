@@ -1,4 +1,4 @@
-﻿"""DSH 桌面宠物 —— 主程序。
+"""DSH 桌面宠物 —— 主程序。
 
 拆出来的模块：
     pet_base      路径、常量、Win32 分层窗口、字体、几何、出错日志
@@ -151,7 +151,7 @@ class PetApp:
     # -- 配置 ---------------------------------------------------------------
     def _load_config(self) -> dict:
         try:
-            with open(config_path(), "r", encoding="utf-8") as fh:
+            with open(config_path(), "r", encoding="utf-8-sig") as fh:
                 return json.load(fh)
         except Exception:                                # noqa: BLE001
             return {}
@@ -1458,9 +1458,14 @@ class PetApp:
             # 位置从角色**本体**的包围盒推（character_box 用 alpha 阈值把光晕
             # 和落影排除掉）—— 用 getbbox() 的话光晕会比头顶高 2~10px
             # （各皮肤不一样），配饰就全飘在头上。
+            #
+            # 必须 copy()：frames 是皮肤的**缓存**，而 draw_accessory 是原地绘制。
+            # 不复制的话配饰会烧进缓存 —— 关掉还在、换一个会叠加
+            # （实测确认：关掉配饰后缓存帧上仍有变化区域）。
             if self.accessory and self.accessory != "none":
                 bb = pet_accessories.character_box(sprite)
                 if bb:
+                    sprite = sprite.copy()
                     pet_accessories.draw_accessory(
                         sprite, self.accessory,
                         cx=(bb[0] + bb[2]) / 2.0,
