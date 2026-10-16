@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 import unittest.mock as mock
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -431,6 +432,159 @@ class TestErrorLog(unittest.TestCase):
         sys.excepthook(ValueError, ValueError("钩子测试"), None)
         self.assertIn("钩子测试", P.read_error_log())
         sys.excepthook = before
+
+
+class TestSkinInstall(unittest.TestCase):
+    """皮肤安装器。重点是**安全边界** —— 用户会从各种地方拿素材包。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-skin-")
+        import pet_skin_install as SI
+        self.SI = SI
+        # 改 assets_dir（唯一真实来源），不是 SI.SKINS_DIR 也不是 B.skins_dir ——
+        # skins_dir() 的函数体在 pet_base 的命名空间里解析 assets_dir，
+        # 所以只要改这一个，pet_render 和 pet_skin_install 看到的都跟着变。
+        self._orig = B.assets_dir
+        B.assets_dir = lambda: os.path.join(self.tmp, "assets")
+
+    def tearDown(self):
+        B.assets_dir = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _zip(self, name, files):
+        path = os.path.join(self.tmp, name)
+        with zipfile.ZipFile(path, "w") as z:
+            for n, d in files.items():
+                z.writestr(n, d)
+        return path
+
+    def _valid_skin_zip(self, name="good.zip"):
+        """造一张符合 Codex 契约的精灵图（8 列 × 192 宽，≥9 行，格子 192×208）。"""
+        from PIL import Image as _I
+        sheet = os.path.join(self.tmp, "spritesheet.png")
+        img = _I.new("RGBA", (8 * 192, 9 * 208), (0, 0, 0, 0))
+        for r in range(9):
+            for c in range(8):
+                img.paste((80, 160, 220, 255),
+                          (c * 192 + 40, r * 208 + 40, c * 192 + 152, r * 208 + 168))
+        img.save(sheet)
+        path = os.path.join(self.tmp, name)
+        with zipfile.ZipFile(path, "w") as z:
+            z.write(sheet, "myskin/spritesheet.png")
+        return path
+
+    # ── 正常路径 ──
+    def test_installs_and_is_recognized(self):
+        sid, _msg = self.SI.install_skin(self._valid_skin_zip(), "test-skin")
+        self.assertEqual(sid, "test-skin")
+        self.assertTrue(os.path.isdir(os.path.join(B.skins_dir(), "test-skin")))
+        # 装完必须能被 discover_skins 认出来 —— 这是安装器最后一道自检
+        self.assertIn("test-skin", {s["id"] for s in P.discover_skins()})
+
+    def test_installed_skin_actually_renders(self):
+        self.SI.install_skin(self._valid_skin_zip(), "test-skin")
+        skin = P.load_skin("test-skin")
+        self.assertTrue(skin.frames("idle"), "装上了但渲染不出帧")
+
+    def test_nested_single_dir_is_unwrapped(self):
+        """压缩包里套一层目录是常态，要能找到真正的皮肤根。"""
+        sid, _ = self.SI.install_skin(self._valid_skin_zip("nested.zip"), "nested")
+        self.assertTrue(os.path.exists(
+            os.path.join(B.skins_dir(), sid, "spritesheet.png")))
+
+    def test_duplicate_is_rejected(self):
+        z = self._valid_skin_zip()
+        self.SI.install_skin(z, "dup")
+        with self.assertRaises(self.SI.SkinInstallError) as cm:
+            self.SI.install_skin(z, "dup")
+        self.assertIn("已经装过", str(cm.exception))
+
+    def test_remove_works_and_builtin_is_protected(self):
+        self.SI.install_skin(self._valid_skin_zip(), "gone")
+        self.SI.remove_skin("gone")
+        self.assertFalse(os.path.isdir(os.path.join(B.skins_dir(), "gone")))
+        for builtin in ("dafeiyu", "kun-like", "matcha-sunny"):
+            with self.subTest(skin=builtin):
+                with self.assertRaises(self.SI.SkinInstallError):
+                    self.SI.remove_skin(builtin)
+
+    # ── 安全边界 ──
+    def test_zip_slip_is_rejected(self):
+        """zip 里写 ../../ 想把文件放到皮肤目录外面。
+
+        这是真会遇到的：素材包来源五花八门，打包工具也可能出错。
+        """
+        z = self._zip("evil.zip", {"../../evil.txt": "pwned", "theme.json": "{}"})
+        with self.assertRaises(self.SI.SkinInstallError):
+            self.SI.install_skin(z, "evil")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "evil.txt")))
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.tmp), "evil.txt")))
+
+    def test_absolute_path_is_rejected(self):
+        z = self._zip("abs.zip", {"C:/windows/temp/x.txt": "x"})
+        with self.assertRaises(self.SI.SkinInstallError):
+            self.SI.install_skin(z, "abs")
+
+    def test_non_skin_zip_is_rejected_and_cleaned(self):
+        z = self._zip("notskin.zip", {"readme.txt": "hello", "a/b/c.txt": "x"})
+        with self.assertRaises(self.SI.SkinInstallError) as cm:
+            self.SI.install_skin(z, "notskin")
+        self.assertIn("没找到皮肤", str(cm.exception))
+        self.assertFalse(os.path.isdir(os.path.join(B.skins_dir(), "notskin")))
+
+    def test_empty_and_missing_are_rejected(self):
+        with zipfile.ZipFile(os.path.join(self.tmp, "empty.zip"), "w"):
+            pass
+        with self.assertRaises(self.SI.SkinInstallError):
+            self.SI.install_skin(os.path.join(self.tmp, "empty.zip"), "e")
+        with self.assertRaises(self.SI.SkinInstallError) as cm:
+            self.SI.install_skin(os.path.join(self.tmp, "nope.zip"), "n")
+        self.assertIn("找不到", str(cm.exception))
+
+    def test_oversized_declared_download_is_rejected(self):
+        """压缩炸弹：声明解压后超大就直接拒绝，别真解出来。"""
+        z = os.path.join(self.tmp, "bomb.zip")
+        with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("spritesheet.png", b"\0" * (self.SI.MAX_EXTRACTED + 1024))
+        with self.assertRaises(self.SI.SkinInstallError) as cm:
+            self.SI.install_skin(z, "bomb")
+        self.assertIn("太大", str(cm.exception))
+
+    def test_slug_makes_safe_dir_names(self):
+        self.assertEqual(self.SI._slug("My Cool Skin!! v2"), "my-cool-skin-v2")
+        self.assertEqual(self.SI._slug("!!!"), "skin")
+        self.assertNotIn("/", self.SI._slug("a/b\\c"))
+
+    def test_markers_match_what_discover_recognizes(self):
+        """安装器的标志文件必须和 discover_skins 认的一致。
+
+        踩过：第一版写成 sprite.png / sheet.png，契约皮肤其实是
+        spritesheet.png —— 结果每次安装都被自己的自检回滚掉。
+        """
+        import re
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "pet_render.py"), encoding="utf-8").read()
+        for marker in self.SI.SKIN_MARKERS:
+            with self.subTest(marker=marker):
+                self.assertIn(f'"{marker}"', src,
+                              f"{marker} 不在 pet_render 里，discover_skins 认不出来")
+
+
+class TestDpiAndSound(unittest.TestCase):
+    def test_dpi_scale_is_sane(self):
+        d = B.dpi_scale()
+        self.assertGreaterEqual(d, 1.0)
+        self.assertLessEqual(d, 4.0)
+
+    def test_set_dpi_awareness_is_safe_to_call(self):
+        self.assertIsInstance(B.set_dpi_awareness(), bool)
+
+    def test_sound_aliases_cover_the_events(self):
+        for ev in ("done", "failed", "waiting", "pomo", "feed", "pet"):
+            self.assertIn(ev, B.SOUND_ALIASES)
+
+    def test_sounds_dir_follows_data_dir(self):
+        self.assertTrue(B.sounds_dir().endswith("sounds"))
 
 
 class TestConfig(unittest.TestCase):

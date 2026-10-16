@@ -192,6 +192,34 @@ DSH 那边一个活跃会话都没有的时候，她不会傻站着显示「空�
 
 网络不通或限流都只算「查不到」，绝不会因此报错或影响启动。
 
+## 🎵 音效
+
+不同事件响不同的系统音（不占体积，换系统主题时音效也跟着变）：
+
+| 事件 | 系统音 |
+|---|---|
+| 任务完成 | `SystemAsterisk` |
+| 出错 | `SystemHand` |
+| 等你回答 | `SystemExclamation` |
+| 番茄钟到点 | `SystemNotification` |
+
+**想换成自己的音效**：在程序目录建 `sounds/`，放 `<事件>.wav`（事件名就是上表左列）：
+
+```
+sounds/done.wav
+sounds/failed.wav
+sounds/pomo.wav
+```
+
+同名文件存在就用你的，不存在就退回系统音。同一种音 3 秒内只响一次
+（多个任务同时完成不会连响），但不同事件各算各的。
+
+## 🖥️ 高 DPI
+
+程序启动时声明 **PerMonitorV2** DPI 感知，窗口尺寸按系统缩放倍数放大 ——
+4K 屏 200% 缩放下不会糊，也不会只有半个手掌大。老系统自动退回
+System DPI 感知，再不行就不声明（模糊但能用）。
+
 ## 🏃 她会自己做什么
 
 | 动作 | 什么时候 |
@@ -281,6 +309,16 @@ clawd 的状态名会映射到本项目的状态：`idle`/`dozing`/`yawning` →
 
 APNG、GIF、WebP、PNG 走 Pillow，动画完整，逐帧时长也读得到。
 静态 SVG 会先光栅化再用。
+
+**不想手动解压？** 右键 → 皮肤 → **从链接安装…**，填一个 zip 的 URL
+或者本地路径，下载、解压、校验、装上一步到位，装完直接切过去。
+
+安装器会自己判断压缩包里哪一层是皮肤根（套一层两层目录都认得），
+装完还会**重新扫一遍确认认得出来**，认不出就回滚删掉 —— 不会留下
+半个坏皮肤让桌宠下次启动时崩。
+
+压缩包里的路径穿越（`../../`）、绝对路径、压缩炸弹都会被拒绝。
+装错了想删：皮肤 → **删除皮肤…**（内置的三套删不掉）。
 
 ⚠️ **脚本驱动的 SVG 只能拿到静止帧。** clawd 的不少 SVG 是 JS 在运行时算动画的
 （cloudling 自己管这叫 "scripted SVG object-channel assets"），光栅化只截得到一帧。
@@ -373,11 +411,20 @@ Calico 不受影响 —— 它只有 idle 用 SVG，而且是眼球追踪用的 
 
 | 路径 | 是什么 |
 |---|---|
-| `dsh_pet.py` | 主程序，状态读取 + 陪伴行为 + 渲染 + 窗口都在这一个文件里 |
+| `dsh_pet.py` | 主程序：`PetApp`（窗口 + 交互）和命令行入口 |
+| `pet_base.py` | 路径、常量、Win32 分层窗口、字体、几何、出错日志 |
+| `pet_types.py` | `TaskInfo` / `Snapshot` |
+| `pet_render.py` | 角色渲染、叠加图形、皮肤、信息卡 |
+| `pet_sources.py` | 读 DSH 会话日志、状态监视、陪伴行为、台词表 |
+| `pet_system.py` | 全局热键、更新检查、开机自启 |
+| `pet_skin_install.py` | 皮肤安装（下载 / 解压 / 校验 / 回滚） |
 | `build_exe.py` | 打包脚本，产出 `dist/DSH-Pet.exe` |
 | `installer.iss` | Inno Setup 安装包脚本（`iscc installer.iss`） |
-| `tests/test_pet.py` | 回归测试，`python tests/test_pet.py` 直接跑 |
+| `tests/` | 回归测试，`python tests/test_pet.py` 直接跑 |
 | `assets/` | 角色三视图，以及 `skins/` 下的契约皮肤包 |
+
+模块之间是单向依赖：`base → types → render / sources / system → dsh_pet`。
+`import dsh_pet` 会把所有符号带出来，所以老用法不变。
 | `dsh-plugin/` | DSH 插件（可选，见下） |
 | `启动桌宠.vbs` / `调试启动.bat` | 静默启动 / 带控制台启动 |
 | `preview/` | 各状态渲染图和实机截图 |
@@ -389,13 +436,23 @@ Calico 不受影响 —— 它只有 idle 用 SVG，而且是眼球追踪用的 
 ## 🧪 测试
 
 ```bash
-python tests/test_pet.py          # 33 项，1 秒跑完，不需要 pytest
+python tests/test_pet.py        # 61 项单元测试，3 秒
+python tests/test_smoke.py      # 14 项冒烟测试，真的把 PetApp 建起来
 ```
 
-覆盖状态机、渲染、日志解析、几何、热键表、台词表 —— 都是**不依赖窗口**的部分。
-开窗口、托盘、全局热键得手工看，测试不碰。
+不需要 pytest，直接跑就行。
 
-CI 会在 Windows + Python 3.10/3.12 上跑这套，push 和 PR 都触发。
+**单元测试**覆盖状态机、渲染、日志解析、几何、热键表、台词表、出错日志、
+皮肤安装（含安全边界：路径穿越 / 绝对路径 / 压缩炸弹）。
+
+**冒烟测试**真的 `new` 一个 `PetApp`、跑一轮事件循环、检查窗口和菜单、
+再干净退出。这一层是拦「启动即崩」的 —— 有过两次发版事故
+（`self.greeted` 属性不存在、`_skin_menu` 没创建）都是启动就崩，
+而单元测试一个都没拦住，因为它们根本不构造 `PetApp`。
+
+副作用控制：临时目录当配置目录，托盘从 `sys.modules` 摘掉（不弹图标、不起线程）。
+
+CI 在 Windows + Python 3.10/3.12 上跑这两套，push 和 PR 都触发。
 
 ## 🔌 DSH 插件（可选）
 

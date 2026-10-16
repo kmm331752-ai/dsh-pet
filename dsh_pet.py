@@ -46,6 +46,12 @@ class PetApp:
         self.demo_i = 0
         self.last_demo = 0.0
 
+        # DPI 缩放。main() 里已经声明了 PerMonitorV2 感知，所以窗口尺寸
+        # 是物理像素 —— 200% 缩放的屏上不乘这个，桌宠只有一半大。
+        # 测试里直接构造 PetApp 时没走 main()，所以这里自己取一次；
+        # 取不到就是 1.0，不影响低 DPI。
+        self.dpi = dpi_scale()
+
         self.root = tk.Tk()
         self.root.title("DSH Pet")
         # Tk 回调（事件绑定、after 任务）里抛的异常默认只打到 stderr ——
@@ -58,10 +64,12 @@ class PetApp:
         dx, dy = default_position()
         x = int(self.cfg.get("x", dx))
         y = int(self.cfg.get("y", dy))
-        # 缩放要在几何之前算好 —— 窗口尺寸由它决定
+        # 缩放要在几何之前算好 —— 窗口尺寸由它决定。
+        # dpi_scale 乘进来：声明了 DPI 感知之后，窗口尺寸是**物理像素**，
+        # 不乘的话 200% 缩放的屏上桌宠只有一半大。
         self.scale = max(SCALE_MIN, min(SCALE_MAX, float(self.cfg.get("scale", 1.0))))
-        self.win_w = max(60, int(round(WIN_W * self.scale)))
-        self.win_h = max(80, int(round(WIN_H * self.scale)))
+        self.win_w = max(60, int(round(WIN_W * self.scale * self.dpi)))
+        self.win_h = max(80, int(round(WIN_H * self.scale * self.dpi)))
         x, y = clamp_position(x, y)                      # 拔掉副屏后可能已经在屏幕外
         self.root.geometry(f"{self.win_w}x{self.win_h}+{x}+{y}")
 
@@ -84,7 +92,9 @@ class PetApp:
         self._moved = False
         self.poke_until = 0.0
         self._tray_actions: list = []
-        self._last_sound = 0.0
+        # 每个事件各自节流 —— 完成和出错能先后响，同一种不会连响
+        self._last_sound: dict = {}
+        self._last_state = ""
 
         # ── 交互状态 ──
         # 缩放（scale / win_w / win_h）已在几何之前初始化，这里只补其余交互状态。
@@ -244,6 +254,92 @@ class PetApp:
             self._skin_menu.add_radiobutton(
                 label=s["display"], value=s["id"], variable=self.var_skin,
                 command=lambda sid=s["id"]: self._switch_skin(sid))
+        self._skin_menu.add_separator()
+        self._skin_menu.add_command(label="从链接安装…", command=self._install_skin_dialog)
+        self._skin_menu.add_command(label="删除皮肤…", command=self._remove_skin_dialog)
+
+    # -- 皮肤安装 / 删除 ---------------------------------------------------
+    def _install_skin_dialog(self) -> None:
+        """要一个链接或本地路径，后台装，装完刷新菜单。"""
+        tk = self.tk
+        win = tk.Toplevel(self.root)
+        win.title("安装皮肤")
+        win.geometry("520x190")
+        win.attributes("-topmost", True)
+        tk.Label(win, text="皮肤压缩包链接，或本地文件路径：",
+                 anchor="w").pack(fill="x", padx=14, pady=(14, 4))
+        entry = tk.Entry(win)
+        entry.pack(fill="x", padx=14)
+        entry.focus_set()
+        tk.Label(win, text="支持 zip；里面要有 theme.json 或 spritesheet.png / spritesheet.webp",
+                 anchor="w", fg="#888").pack(fill="x", padx=14, pady=(4, 0))
+        status = tk.Label(win, text="", anchor="w", wraplength=480, justify="left")
+        status.pack(fill="x", padx=14, pady=(8, 0))
+
+        def go():
+            src = entry.get().strip().strip('"')
+            if not src:
+                status.configure(text="先填个链接或路径")
+                return
+            status.configure(text="正在下载安装…")
+            win.update_idletasks()
+
+            def work():
+                try:
+                    import pet_skin_install
+                    skin_id, msg = pet_skin_install.install_skin(src)
+                    self._tray_actions.append(f"skin-installed:{skin_id}:{msg}")
+                except Exception as exc:                 # noqa: BLE001
+                    log_error("安装皮肤失败", exc)
+                    self._tray_actions.append(f"skin-error:{exc}")
+
+            threading.Thread(target=work, name="dsh-pet-skin", daemon=True).start()
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=14, pady=(10, 12))
+        tk.Button(bar, text="安装", command=go).pack(side="right")
+        tk.Button(bar, text="取消", command=win.destroy).pack(side="right", padx=6)
+        entry.bind("<Return>", lambda _e: go())
+
+    def _remove_skin_dialog(self) -> None:
+        """列出能删的皮肤（自己装的），选一个删掉。"""
+        tk = self.tk
+        import pet_skin_install
+        removable = [s for s in discover_skins() if s["id"] not in pet_skin_install.BUILTIN]
+        if not removable:
+            self._say("没有可删的皮肤", 2.5)
+            return
+        win = tk.Toplevel(self.root)
+        win.title("删除皮肤")
+        win.geometry("360x300")
+        win.attributes("-topmost", True)
+        tk.Label(win, text="选一套删掉（内置皮肤不在列表里）：",
+                 anchor="w").pack(fill="x", padx=14, pady=(14, 6))
+        box = tk.Listbox(win)
+        box.pack(fill="both", expand=True, padx=14)
+        for s in removable:
+            box.insert("end", f"{s['display']}  ({s['id']})")
+
+        def do():
+            sel = box.curselection()
+            if not sel:
+                return
+            skin_id = removable[sel[0]]["id"]
+            try:
+                pet_skin_install.remove_skin(skin_id)
+                if self.skin.name == skin_id:
+                    self._switch_skin("dafeiyu")          # 删的是当前用的，换回内置
+                self._rebuild_skin_menu()
+                win.destroy()
+                self._say("删掉了", 2.5)
+            except Exception as exc:                     # noqa: BLE001
+                log_error("删除皮肤失败", exc)
+                tk.Label(win, text=str(exc), fg="#c33").pack(padx=14)
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=14, pady=(8, 12))
+        tk.Button(bar, text="删除", command=do).pack(side="right")
+        tk.Button(bar, text="取消", command=win.destroy).pack(side="right", padx=6)
 
     def _switch_skin(self, skin_id: str) -> None:
         new = load_skin(skin_id)
@@ -490,6 +586,15 @@ class PetApp:
                 if self.companion is not None:
                     self.companion.say(f"有新版本 {tag}", 6.0)
                 print(f"[update] 有新版本 {tag} -> {RELEASES_URL}")
+            elif isinstance(act, str) and act.startswith("skin-installed:"):
+                _tag, skin_id, msg = act.split(":", 2)
+                self._rebuild_skin_menu()
+                self._switch_skin(skin_id)               # 装完直接用上
+                self._say("装好了", 2.6)
+                print(f"[skin] {msg}")
+            elif isinstance(act, str) and act.startswith("skin-error:"):
+                self._say("装不上", 2.6)
+                print(f"[skin] 安装失败：{act.split(':', 1)[1]}", file=sys.stderr)
 
     # -- 番茄钟 / 专注 / 截图模式 -------------------------------------------
     def _toggle_focus(self) -> None:
@@ -643,21 +748,36 @@ class PetApp:
             return
         # 到点了
         self.pomo_until = 0.0
-        self._play_sound()
+        self._play_sound("pomo")
         if self.companion is not None:
             self.companion.say(say_line("POMO_DONE_LINES"), 6.0)
 
-    def _play_sound(self) -> None:
+    def _play_sound(self, event: str = "done") -> None:
+        """响一声。
+
+        音效来源按优先级：
+          1. <程序目录>/sounds/<event>.wav —— 用户自己放的音效包
+          2. Windows 系统事件音（按事件选不同的）
+          3. 静音
+
+        同一事件 3 秒内只响一次（多个任务同时完成不该连响）。
+        不同事件各有各的节流，所以"完成"和"出错"能先后响。
+        """
         if not self.sound:
             return
         now = time.time()
-        if now - self._last_sound < 3.0:                  # 多个任务同时完成只响一次
+        if now - self._last_sound.get(event, 0.0) < 3.0:
             return
-        self._last_sound = now
+        self._last_sound[event] = now
         try:
             import winsound
-            winsound.PlaySound("SystemAsterisk",
-                               winsound.SND_ALIAS | winsound.SND_ASYNC)
+            # 用户音效包优先
+            wav = os.path.join(data_dir(), "sounds", f"{event}.wav")
+            if os.path.exists(wav):
+                winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                return
+            alias = SOUND_ALIASES.get(event, SOUND_ALIASES["done"])
+            winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
         except Exception:                                 # noqa: BLE001
             pass
 
@@ -687,8 +807,8 @@ class PetApp:
             return
         old_w, old_h = self.win_w, self.win_h
         self.scale = new_scale
-        self.win_w = max(60, int(round(WIN_W * self.scale)))
-        self.win_h = max(80, int(round(WIN_H * self.scale)))
+        self.win_w = max(60, int(round(WIN_W * self.scale * self.dpi)))
+        self.win_h = max(80, int(round(WIN_H * self.scale * self.dpi)))
         x = self.root.winfo_x() + (old_w - self.win_w) // 2
         y = self.root.winfo_y() + (old_h - self.win_h) // 2
         self.display, self.backend = make_display(self.root, self.win_w, self.win_h)
@@ -924,7 +1044,11 @@ class PetApp:
                 snap = self.watcher.poll()
                 if self.watcher._new_completion:          # 有任务刚跑完
                     self.watcher._new_completion = False
-                    self._play_sound()
+                    self._play_sound("done")
+                # 出错也响一声 —— 但不是"完成"那个音，免得听混
+                if snap.state == "failed" and self._last_state != "failed":
+                    self._play_sound("failed")
+                self._last_state = snap.state
                 # DSH 那边没活干（空闲或压根没会话）→ 交给陪伴模式，她自己过日子。
                 # 有活在跑时反过来把她叫醒，免得 DSH 都开工了她还在睡。
                 if snap.state in ("idle", "offline") and self.companion is not None:
@@ -1149,6 +1273,9 @@ def main() -> int:
 
     # 尽早装上 —— 之后任何未捕获异常都会落盘，而不是消失在 exe 的 stderr 黑洞里
     install_excepthook()
+    # 必须在建任何窗口之前声明 DPI 感知，否则 Windows 会先按老的缩放方式
+    # 把窗口位图拉伸，4K 屏上整只桌宠和字都是糊的。
+    set_dpi_awareness()
 
     if args.list_skins:
         for s in discover_skins():

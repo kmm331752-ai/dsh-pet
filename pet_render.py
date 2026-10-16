@@ -444,7 +444,7 @@ CLAWD_STATE_MAP = {
 # clawd 的用户主题目录（%APPDATA%/clawd-on-desk/themes）
 CLAWD_THEME_DIRS = [
     os.path.join(os.environ.get("APPDATA", ""), "clawd-on-desk", "themes"),
-    os.path.join(SKINS_DIR, "clawd"),
+    os.path.join(skins_dir(), "clawd"),
 ]
 RASTER_EXTS = (".apng", ".gif", ".webp", ".png", ".jpg", ".jpeg")
 # 交互反应的种类：poke = 左键点一下，drag = 正在拖动
@@ -661,7 +661,7 @@ def discover_skins() -> list:
     out = [dict(id="dafeiyu", display="大肥鱼（内置）", kind="dafeiyu", path=None)]
     seen = {"dafeiyu"}
     # Codex 精灵图契约
-    for root, tag in [(SKINS_DIR, ""),
+    for root, tag in [(skins_dir(), ""),
                       (os.path.join(os.path.expanduser("~"), ".codex", "pets"), " (Codex)")]:
         try:
             names = sorted(os.listdir(root))

@@ -104,6 +104,84 @@ def record_path() -> str:
     return os.path.join(data_dir(), "相处记录.png")
 
 
+def sounds_dir() -> str:
+    """自定义音效包目录。放 <事件>.wav 就会盖掉系统音。"""
+    return os.path.join(data_dir(), "sounds")
+
+
+# 事件 -> Windows 系统事件音。
+# 用系统别名而不是自带 wav：不增加体积，而且用户换系统主题时音效跟着变。
+# 想换掉就在 sounds/ 里放同名 wav。
+SOUND_ALIASES = {
+    "done": "SystemAsterisk",       # 任务完成
+    "failed": "SystemHand",         # 出错
+    "waiting": "SystemExclamation",  # 等你回答
+    "pomo": "SystemNotification",   # 番茄钟到点
+    "feed": "SystemDefault",        # 喂食
+    "pet": "SystemDefault",         # 被摸
+}
+
+
+# ── 高 DPI ──────────────────────────────────────────────────────────────────
+# 不做 DPI 感知的话，Windows 会把窗口位图拉伸到物理像素 —— 4K 屏上
+# 整只桌宠是糊的，字也糊。做了感知就得自己按 DPI 放大尺寸，
+# 否则 248 逻辑像素在 200% 缩放下会变成半个手掌大。
+
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+
+
+def set_dpi_awareness() -> bool:
+    """声明本进程自己做 DPI 缩放。返回是否成功。
+
+    PerMonitorV2 是 Win10 1703+ 才有的；老系统退回 System DPI 感知，
+    再不行就什么都不做（模糊但能用）。
+    """
+    try:
+        user32 = ctypes.windll.user32
+    except Exception:                                    # noqa: BLE001
+        return False
+    try:
+        if user32.SetProcessDpiAwarenessContext(
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            return True
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        # Win8.1+：PROCESS_PER_MONITOR_DPI_AWARE = 2
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return True
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        user32.SetProcessDPIAware()                      # Vista+
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def dpi_scale() -> float:
+    """主显示器的缩放倍数（96 DPI = 1.0）。取不到就当 1.0。"""
+    try:
+        # GetDpiForSystem 是 Win10 1607+；老系统用桌面 DC 的 LOGPIXELSX
+        try:
+            dpi = ctypes.windll.user32.GetDpiForSystem()
+            if dpi:
+                return max(1.0, min(4.0, dpi / 96.0))
+        except Exception:                                # noqa: BLE001
+            pass
+        hdc = ctypes.windll.user32.GetDC(0)
+        try:
+            LOGPIXELSX = 88
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, LOGPIXELSX)
+        finally:
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+        if dpi:
+            return max(1.0, min(4.0, dpi / 96.0))
+    except Exception:                                    # noqa: BLE001
+        pass
+    return 1.0
+
+
 # 单实例锁用的本地端口（只绑 127.0.0.1，不对外）
 SINGLE_INSTANCE_PORT = 51937
 
@@ -189,8 +267,32 @@ GAZE_HOLD = 1.6                  # 看多久
 WANDER_STEP = 3                  # 溜达时每帧移动多少像素（越小越自然）
 
 # 角色素材来自 1190fasheqi/dafeiyu-pet（MIT），见 assets/ATTRIBUTION.md
-ASSETS = os.path.join(app_dir(), "assets")
-SKINS_DIR = os.path.join(ASSETS, "skins")
+
+
+def assets_dir() -> str:
+    return os.path.join(app_dir(), "assets")
+
+
+def skins_dir() -> str:
+    """皮肤目录。
+
+    注意这里**调 assets_dir() 而不是读 ASSETS 常量** —— 常量在
+    `from pet_base import *` 时会被复制进每个模块，测试改一处不影响别处。
+    函数体里的名字是在 **pet_base 自己的命名空间**里解析的，所以只要
+    测试改 pet_base.assets_dir，所有模块（pet_render / pet_skin_install）
+    看到的都跟着变，哪怕它们各自持有一份 skins_dir 的引用。
+
+    这个坑在 SKINS_DIR 上踩了两次：第一次是安装器写进临时目录而
+    discover_skins 还在看真目录，第二次是改成函数后仍然改不动 ——
+    因为函数里读的还是常量。
+    """
+    return os.path.join(assets_dir(), "skins")
+
+
+# 素材根目录（渲染时用）。要换目录请改 assets_dir()
+ASSETS = assets_dir()
+
+
 VIEW_FOR_STATE = {"idle": "front", "thinking": "front", "tools": "side",
                   "waiting": "front", "failed": "front",
                   "celebrating": "front", "offline": "back",
