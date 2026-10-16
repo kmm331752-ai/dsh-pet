@@ -86,7 +86,7 @@ class HotKeys(threading.Thread):
 # 网络不通、限流、被墙都只算「查不到」，绝不能让桌宠因此启动不了或弹错误。
 
 REPO = "kmm331752-ai/dsh-pet"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 UPDATE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 

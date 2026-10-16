@@ -1265,6 +1265,49 @@ class TestWeekStats(unittest.TestCase):
         self.assertEqual(m.week_stats()["slowest"], [])
 
 
+class TestShortName(unittest.TestCase):
+    """皮肤名截断。
+
+    踩过：直接用 `name[:14]` 会在词中间切开，界面上出现
+    「Hash Sage (cla」「Calico (clawd」这种。
+    """
+
+    @staticmethod
+    def _f():
+        import dsh_pet
+        return dsh_pet._short_name
+
+    def test_short_names_pass_through(self):
+        f = self._f()
+        for s in ("大肥鱼（内置）", "matcha-sunny", "短名"):
+            self.assertEqual(f(s), s)
+
+    def test_breaks_at_parenthesis(self):
+        f = self._f()
+        self.assertEqual(f("Hash Sage (clawd)"), "Hash Sage")
+        self.assertEqual(f("Cloudling (clawd)"), "Cloudling")
+
+    def test_breaks_at_space_when_no_paren(self):
+        """没有括号就在最后一个空格断 —— 丢掉不完整的那个词。
+
+        "a very long skin name here"[:16] = "a very long skin"，
+        最后那个 "skin" 是切了一半的词，丢掉更自然。
+        """
+        f = self._f()
+        self.assertEqual(f("a very long skin name here"), "a very long")
+
+    def test_hard_cut_gets_an_ellipsis(self):
+        f = self._f()
+        out = f("很长的没有括号没有空格的名字啊啊啊啊啊")
+        self.assertLessEqual(len(out), 17)
+        self.assertTrue(out.endswith("…"), out)
+
+    def test_never_returns_empty(self):
+        f = self._f()
+        self.assertEqual(f(""), "")
+        self.assertTrue(f("(clawd)"))
+
+
 class TestConfig(unittest.TestCase):
     def test_paths_are_absolute(self):
         for p in (B.config_path(), B.mood_path(), B.error_log_path(),

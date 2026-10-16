@@ -42,6 +42,31 @@ from pet_i18n import t
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _short_name(name: str, limit: int = 16) -> str:
+    """皮肤名截断成一行。
+
+    别用 `name[:limit]` —— 那会在词中间切开，出来是
+    「Hash Sage (cla」「Calico (clawd」这种。优先在括号或空格处断，
+    实在没地方断才硬切，并加省略号。
+    """
+    name = (name or "").strip()
+    if len(name) <= limit:
+        return name
+    head = name[:limit]
+    # 优先在左括号断：「Hash Sage (clawd)」-> 「Hash Sage」
+    for sep in ("（", "("):
+        if sep in head:
+            cut = head[:head.index(sep)].rstrip()        # index 给的是下标，别忘了切片
+            if cut:
+                return cut
+    # 其次在最后一个空格断
+    if " " in head:
+        cut = head[:head.rindex(" ")].rstrip()
+        if cut:
+            return cut
+    return head.rstrip() + "…"
+
+
 class PetApp:
     def __init__(self, args):
         import tkinter as tk
@@ -141,6 +166,20 @@ class PetApp:
         self._peek_until = 0.0        # 贴边隐藏后探出来的时刻
         self._attention_at = 0.0      # 上次"等待提醒"挪窗口的时刻
         self._long_press_job = None
+        # _drop_job 必须在这里初始化。原来是"用到才建"，而 _attention()
+        # 直接读 self._drop_job —— 全新启动、还没拖过她的时候就读到不存在的
+        # 属性，AttributeError 被 _poll 的 except 吞掉。后果是
+        # 「卡在你这儿就走到屏幕中间」从来没生效过（除非你先拖一次）。
+        self._drop_job = None
+        # 各个弹出窗口的句柄，以及皮肤预览的图片引用。
+        # 图片必须留引用，否则被 GC 掉 —— Tk 只存名字，画面上会变空白。
+        # 统一在 __init__ 里建出来，不要"用到才建"：那样某个功能会安静地不工作
+        # （_drop_job 就是这么坑掉「等待提醒」的）。
+        self._settings_win = None
+        self._chat_win = None
+        self._sess_win = None
+        self._preview_win = None
+        self._preview_imgs = []
         self.wander_x = 0             # 溜达时窗口的水平偏移
 
         self.skin = load_skin(getattr(args, "skin", None) or self.cfg.get("skin", "dafeiyu"))
@@ -938,7 +977,8 @@ class PetApp:
             else:
                 tk.Button(cell, text="?", width=8, height=4,
                           command=lambda sid=s["id"]: self._pick_skin(sid, win)).pack()
-            tk.Label(cell, text=s["display"][:14], font=("Microsoft YaHei UI", 8)).pack()
+            tk.Label(cell, text=_short_name(s["display"], 16),
+                     font=("Microsoft YaHei UI", 8)).pack()
 
         tk.Button(win, text=t("关闭"),
                   command=lambda: (win.destroy(),
@@ -1706,7 +1746,31 @@ class PetApp:
                         self.root.geometry(f"+{wx}+{self.root.winfo_y()}")
         except Exception as exc:                         # noqa: BLE001
             log_error("poll 轮询异常", exc)
+        # 健康提醒放在 try 的**最后**，不走任何分支 —— 三条路径（demo /
+        # force_state / watcher）都要经过这里。
+        #
+        # 之前它挂在 CompanionSource.poll() 里，而那只在 DSH 空闲时才跑，
+        # 结果是「你越忙她越不提醒」——久坐恰恰发生在你干活的时候。
+        # 实测：DSH 是 tools / waiting 时 _health_check 被调用 0 次。
+        try:
+            self._health_tick()
+        except Exception as exc:                         # noqa: BLE001
+            log_error("健康提醒异常", exc)
         self.root.after(POLL_MS, self._poll)
+
+    def _health_tick(self) -> None:
+        """久坐 / 喝水提醒 + 把气泡贴到当前 snapshot 上。"""
+        if self.companion is None:
+            return
+        self.companion._health_check(time.time(), idle_seconds())
+        # DSH 忙的时候 snapshot 是 watcher 给的，她说的话得手动贴上去
+        if (self.snap is not None
+                and self.snap.state not in ("idle", "offline")
+                and not self.focus_mode
+                and self.companion.bubble
+                and time.time() < self.companion.bubble_until):
+            self.snap.detail_line = self.companion.bubble
+            self.snap.bubble = True
 
     def _demo_snapshot(self, state: str) -> Snapshot:
         import random

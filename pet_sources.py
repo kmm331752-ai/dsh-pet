@@ -746,7 +746,13 @@ class CompanionSource:
 
         判据是**系统空闲时间**：idle 很短说明人在用电脑，一直很短就是久坐。
         走开超过 HEALTH_BREAK 就重置 —— 回来了重新算，不会追着人提醒。
+
+        **这个函数要由 PetApp 每轮无条件调用**，不能挂在 poll() 里。
+        挂 poll() 里只会在 DSH 空闲时跑到，而久坐恰恰发生在你干活的时候 ——
+        结果是「你越忙她越不提醒」，等于没做（实测：DSH 忙时调用 0 次）。
         """
+        if not HEALTH_ON:
+            return
         if idle >= HEALTH_BREAK:
             # 离开过，重新计时；顺便把下一次提醒也推后
             self.sitting_since = now
@@ -911,8 +917,6 @@ class CompanionSource:
                     self.next_peek = now + random.uniform(120, 300)
 
         self._situational(now, idle, night)
-        if HEALTH_ON:
-            self._health_check(now, idle)
 
         # ── 组装 Snapshot ──
         m = self.mood

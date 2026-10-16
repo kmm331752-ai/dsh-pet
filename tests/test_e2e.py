@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -33,6 +34,7 @@ import dsh_pet as P  # noqa: E402
 import pet_accessories as A  # noqa: E402
 import pet_base as B  # noqa: E402
 import pet_i18n as I  # noqa: E402
+import pet_sources as S  # noqa: E402
 
 TK_OK = True
 try:
@@ -135,6 +137,117 @@ class E2EBase(unittest.TestCase):
     def diff_box(a, b):
         from PIL import ImageChops
         return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox()
+
+
+class TestHealthReminderEndToEnd(E2EBase):
+    """久坐提醒要能从**真实的轮询路径**触发。
+
+    这里踩过一个坑，而且是"测试全绿但功能等于没做"的那种：
+    _health_check 原来挂在 CompanionSource.poll() 里，而 poll() 只在
+    DSH **空闲**时才被调用（dsh_pet.py 里 `if snap.state in ("idle","offline")`）。
+    久坐恰恰发生在你干活的时候 —— 结果是「你越忙她越不提醒」。
+
+    实测过：DSH 状态 tools / waiting 时 _health_check 被调用 **0 次**。
+    当时的单元测试直接调 _health_check，所以完全没发现。
+
+    这条测试走 _poll()，断言的是"气泡出现在最终 snapshot 上"。
+    """
+
+    def _stub_watcher(self, app, state: str, **kw):
+        """塞一个假 watcher。
+
+        注意 make_app 默认 force_state="idle" —— 那样 _poll 会走
+        _demo_snapshot 分支，根本到不了 watcher。所以这几条测试要
+        force_state=None（那样 PetApp 会建真的 watcher 和 companion，
+        再把 watcher 换掉）。
+        """
+        snap = P.Snapshot(state=state, session_id="x", title="t", **kw)
+        app.watcher = type("W", (), {
+            "poll": staticmethod(lambda: snap),
+            "_new_completion": False,
+        })()
+        return snap
+
+    def test_fires_while_dsh_is_busy(self):
+        app = self.make_app(force_state=None, no_companion=False)
+        app.root.update()
+        self.assertIsNotNone(app.watcher, "force_state=None 时应该有 watcher")
+        self.assertIsNotNone(app.companion, "应该有 companion")
+
+        with mock.patch.object(S, "HEALTH_FIRST", 0), \
+             mock.patch.object(S, "HEALTH_EVERY", 0), \
+             mock.patch.object(S, "idle_seconds", lambda: 1.0):
+            for state in ("tools", "thinking", "waiting", "idle"):
+                with self.subTest(state=state):
+                    app.companion.sitting_since = 0
+                    app.companion.next_health = 0
+                    app.companion.bubble = ""
+                    app.companion.bubble_until = 0
+                    self._stub_watcher(app, state)
+                    app._poll()
+                    self.assertTrue(app.snap.bubble,
+                                    f"DSH 是 {state} 时没提醒（气泡没出现）")
+                    self.assertTrue(app.snap.detail_line)
+
+    def test_busy_snapshot_still_keeps_its_own_text_without_a_bubble(self):
+        """没有气泡时，忙碌状态的文案不能被改掉。"""
+        app = self.make_app(force_state=None, no_companion=False)
+        app.root.update()
+        app.companion.bubble = ""
+        app.companion.bubble_until = 0
+        self._stub_watcher(app, "tools", detail_line="原来的文案")
+        with mock.patch.object(S, "idle_seconds", lambda: 1.0):
+            app._poll()
+        self.assertEqual(app.snap.detail_line, "原来的文案")
+
+
+class TestLazyAttributes(E2EBase):
+    """「用到才建」的属性要不得。
+
+    _drop_job 原来是这么写的，而 _attention() 直接读 self._drop_job ——
+    全新启动、还没拖过她的时候 AttributeError，被 _poll 的 except 吞掉。
+    后果：「卡在你这儿就走到屏幕中间」**从来没生效过**。
+
+    这类 bug 不会崩、不会报错，只是某个功能安静地不工作。
+    """
+
+    def test_attention_works_on_a_fresh_app(self):
+        app = self.make_app()
+        app.root.update()
+        app._attention_at = 0
+        try:
+            app._attention()
+        except AttributeError as exc:
+            self.fail(f"全新启动时 _attention() 抛了 AttributeError：{exc}")
+
+    def test_no_attribute_is_created_only_on_use(self):
+        """扫一遍：代码直接读的 self._xxx，__init__ 里都得先建出来。
+
+        判定「作者知道它可能不存在」的方式是**全文件搜** getattr(self, "xxx" ——
+        不能只看用到的那一行，因为守卫常写在上一行：
+
+            if getattr(self, "_settings_win", None) is not None:
+                self._settings_win.deiconify()      # ← 这行没有 getattr
+
+        第一版按行找，把这几个误报成问题。
+        """
+        app = self.make_app()
+        app.root.update()
+        src_path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "dsh_pet.py")
+        with open(src_path, encoding="utf-8") as fh:
+            src = fh.read()
+
+        missing = []
+        for m in re.finditer(r"self\.(_[a-z][a-z_]*)\b(?!\s*=[^=])", src):
+            name = m.group(1)
+            if f'getattr(self, "{name}"' in src:
+                continue                                 # 明确处理过"可能没有"
+            if not hasattr(app, name) and name not in missing:
+                line = src[:m.start()].count("\n") + 1
+                missing.append(f"{name} (L{line})")
+        self.assertEqual(missing, [],
+                         f"这些属性 __init__ 里没建、代码却直接读：{missing}")
 
 
 class TestAccessoryEndToEnd(E2EBase):
