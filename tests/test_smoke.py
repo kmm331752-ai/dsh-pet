@@ -267,6 +267,24 @@ class TestAppSmoke(unittest.TestCase):
         app.root.update()
         self.assertIs(app._settings_win, first, "第二次点击又建了一个窗口")
 
+    @staticmethod
+    def _walk(widget) -> list:
+        """递归收集一个窗口里的所有控件。
+
+        只数直接子控件是不够的 —— 设置窗口的按钮装在 Frame 里，
+        直接数只会数到 1 个（"关闭"），看着像少了但其实是数法不对。
+        """
+        out = []
+        stack = [widget]
+        while stack:
+            w = stack.pop()
+            out.append(w)
+            try:
+                stack.extend(w.winfo_children())
+            except Exception:                            # noqa: BLE001
+                pass
+        return out
+
     def test_settings_checkbuttons_all_exist(self):
         """设置窗口里每个复选框都要真的建出来。
 
@@ -278,11 +296,12 @@ class TestAppSmoke(unittest.TestCase):
         app._open_settings()
         app.root.update()
         win = app._settings_win
-        checks = [w for w in win.winfo_children()
-                  if w.winfo_class() == "Checkbutton"]
+        widgets = self._walk(win)
+        checks = [w for w in widgets if w.winfo_class() == "Checkbutton"]
         self.assertGreaterEqual(len(checks), 4, f"复选框只有 {len(checks)} 个")
-        buttons = [w for w in win.winfo_children() if w.winfo_class() == "Button"]
-        self.assertTrue(buttons, "设置窗口没有按钮")
+        buttons = [w for w in widgets if w.winfo_class() == "Button"]
+        # 位置复位 / 重置相处记录 / 出错日志 / 关闭
+        self.assertGreaterEqual(len(buttons), 4, f"按钮只有 {len(buttons)} 个")
         win.destroy()
         app._settings_win = None
 
