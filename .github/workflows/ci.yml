@@ -46,5 +46,6 @@ jobs:
         run: |
           python -m py_compile pet_base.py pet_types.py pet_render.py
           python -m py_compile pet_sources.py pet_system.py pet_skin_install.py
+          python -m py_compile pet_accessories.py pet_chat.py
           python -m py_compile dsh_pet.py build_exe.py
           python -m py_compile tests/test_pet.py tests/test_smoke.py

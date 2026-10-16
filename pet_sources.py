@@ -519,6 +519,79 @@ class Mood:
     last_tick: float = 0.0          # 上次结算时间（算精力增减用）
     greeted: str = ""               # 已经问候过的时段（morning / night），避免重复
     unlocked: int = 0               # 已解锁的相处天数里程碑
+    # 作息统计：24 个格子，每个格子记「这个小时你有多活跃」。
+    # 由 PetApp 每次轮询时喂进来（DSH 有活在跑 = 活跃）。
+    # 目的是让她学到「你几点在、几点不在」，而不是死按 23:00~07:00 判断夜晚。
+    busy_slots: list = field(default_factory=lambda: [0] * 24)
+    seen_slots: list = field(default_factory=lambda: [0] * 24)
+
+    # -- 作息统计 -----------------------------------------------------------
+    # 样本不够时不下结论 —— 刚开始用的一两个小时不该让她误以为你半夜不睡。
+    SCHEDULE_MIN_SAMPLES = 30
+    SCHEDULE_IDLE_RATIO = 0.25
+
+    def note_activity(self, hour: int, busy: bool) -> None:
+        """记一次观察。hour 是 0~23。"""
+        if not 0 <= hour < 24:
+            return
+        # 老版本的 json 里没有这两个字段，_load 会用默认值补上；
+        # 但如果被人手改成了长度不对的列表，这里兜一下。
+        if len(self.busy_slots) != 24:
+            self.busy_slots = [0] * 24
+        if len(self.seen_slots) != 24:
+            self.seen_slots = [0] * 24
+        self.seen_slots[hour] += 1
+        if busy:
+            self.busy_slots[hour] += 1
+
+    def active_ratio(self, hour: int) -> float:
+        """这个小时你有多活跃（0~1）。样本不够时返回 -1 表示「不知道」。"""
+        if not 0 <= hour < 24 or len(self.seen_slots) != 24:
+            return -1.0
+        seen = self.seen_slots[hour]
+        if seen < self.SCHEDULE_MIN_SAMPLES:
+            return -1.0
+        return self.busy_slots[hour] / seen
+
+    def is_usually_idle(self, hour: int) -> bool:
+        """统计上你这个时候通常不在。样本不够一律返回 False（保守：按在算）。"""
+        r = self.active_ratio(hour)
+        return r >= 0.0 and r < self.SCHEDULE_IDLE_RATIO
+
+    def schedule_known(self) -> bool:
+        """够不够画一张作息图 —— 设置窗口用它决定要不要显示。
+
+        要求至少 6 个钟点各自攒够样本。第一版写成「总样本 >= 30*4」，
+        那是拍脑袋的数：轮询是 350ms 一次，120 个样本 42 秒就攒到了，
+        而摊到 24 个格子里每小时才 5 个 —— 什么都说明不了。
+        按钟点分别把关才有意义。
+        """
+        if len(self.seen_slots) != 24:
+            return False
+        ready = sum(1 for h in range(24)
+                    if self.seen_slots[h] >= self.SCHEDULE_MIN_SAMPLES)
+        return ready >= 6
+
+    def schedule_text(self) -> str:
+        """把作息画成一行，给设置窗口看。"""
+        if len(self.seen_slots) != 24:
+            self.seen_slots = [0] * 24
+        ready = sum(1 for h in range(24)
+                    if self.seen_slots[h] >= self.SCHEDULE_MIN_SAMPLES)
+        if ready < 6:
+            return f"还在观察你的作息（{ready}/6 个时段攒够样本）"
+        blocks = []
+        for h in range(24):
+            r = self.active_ratio(h)
+            if r < 0:
+                blocks.append("·")                       # 样本不够
+            elif r >= 0.5:
+                blocks.append("█")                       # 常在
+            elif r >= self.SCHEDULE_IDLE_RATIO:
+                blocks.append("▒")                       # 有时在
+            else:
+                blocks.append("░")                       # 通常不在
+        return "0" + "".join(blocks) + "23"
 
     @property
     def days_together(self) -> int:
@@ -626,9 +699,27 @@ class CompanionSource:
         self._entered = time.time()
 
     def _night(self) -> bool:
+        """现在是「她该睡」的时候吗。
+
+        两个判据取或：
+          · 钟点落在 NIGHT_HOURS 里（兜底，没有统计数据时也成立）
+          · 学到的作息说你这个点通常不在 —— 夜班的人 03:00 还在干活，
+            那对她来说就不是深夜
+
+        第二条要样本够才生效（is_usually_idle 自己会把关）。
+        """
         hour = time.localtime().tm_hour
         lo, hi = NIGHT_HOURS
-        return hour >= lo or hour < hi
+        if hour >= lo or hour < hi:
+            return True
+        return self.mood.is_usually_idle(hour)
+
+    def observe(self, busy: bool) -> None:
+        """PetApp 每次轮询时喂进来：DSH 现在有没有活在跑。
+
+        这是「学习作息」的输入 —— 不需要读键盘记录，DSH 忙就说明你在。
+        """
+        self.mood.note_activity(time.localtime().tm_hour, busy)
 
     def _settle_energy(self, now: float, dt: float) -> None:
         """醒着掉精力，睡着回精力。"""

@@ -25,7 +25,9 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dsh_pet as P  # noqa: E402
+import pet_accessories as A  # noqa: E402
 import pet_base as B  # noqa: E402
+import pet_chat as C  # noqa: E402
 import pet_sources as S  # noqa: E402
 
 
@@ -585,6 +587,286 @@ class TestDpiAndSound(unittest.TestCase):
 
     def test_sounds_dir_follows_data_dir(self):
         self.assertTrue(B.sounds_dir().endswith("sounds"))
+
+
+class TestSchedule(unittest.TestCase):
+    """作息学习：从「DSH 忙不忙」推出你几点在、几点不在。"""
+
+    def setUp(self):
+        # CompanionSource 会读写 pet_mood.json —— 不隔离的话
+        # 测试会污染你真实的相处记录（而且互相干扰：这条一开始就是
+        # 读到了别的测试留下的样本才失败的）。
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-sched-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_starts_unknown(self):
+        m = S.Mood()
+        self.assertEqual(len(m.busy_slots), 24)
+        self.assertEqual(len(m.seen_slots), 24)
+        self.assertEqual(m.active_ratio(9), -1.0, "没样本时不该给比例")
+        self.assertFalse(m.is_usually_idle(9), "没样本时保守当作你在")
+        self.assertFalse(m.schedule_known())
+
+    def test_learns_busy_and_idle_hours(self):
+        m = S.Mood()
+        for _ in range(40):
+            m.note_activity(9, True)
+            m.note_activity(3, False)
+        self.assertAlmostEqual(m.active_ratio(9), 1.0)
+        self.assertAlmostEqual(m.active_ratio(3), 0.0)
+        self.assertFalse(m.is_usually_idle(9))
+        self.assertTrue(m.is_usually_idle(3))
+
+    def test_bad_input_is_ignored(self):
+        m = S.Mood()
+        m.note_activity(99, True)
+        m.note_activity(-1, True)
+        self.assertEqual(sum(m.seen_slots), 0)
+        self.assertEqual(m.active_ratio(99), -1.0)
+
+    def test_corrupt_slots_are_repaired(self):
+        """手改坏了 json 也不该崩 —— 长度不对就重置。"""
+        m = S.Mood()
+        m.busy_slots = [1, 2, 3]
+        m.seen_slots = "坏了"
+        m.note_activity(5, True)
+        self.assertEqual(len(m.busy_slots), 24)
+        self.assertEqual(len(m.seen_slots), 24)
+
+    def test_schedule_known_needs_six_hours(self):
+        """门槛按钟点算，不是按总样本 —— 轮询 350ms 一次，
+        总样本 120 个才 42 秒，摊到 24 格里每小时 5 个，什么都说明不了。"""
+        m = S.Mood()
+        for h in range(5):
+            for _ in range(40):
+                m.note_activity(h, True)
+        self.assertFalse(m.schedule_known(), "只有 5 个时段够样本")
+        for _ in range(40):
+            m.note_activity(5, True)
+        self.assertTrue(m.schedule_known(), "6 个时段够了")
+
+    def test_night_uses_learned_schedule(self):
+        """夜班的人凌晨也在 —— 学到的作息要能推翻钟点判据。"""
+        c = S.CompanionSource()
+        # 中午通常不在 -> 算 night
+        m = S.Mood()
+        for _ in range(40):
+            m.note_activity(12, False)
+        c.mood = m
+        noon = time.struct_time((2026, 1, 1, 12, 0, 0, 3, 1, -1))
+        with mock.patch.object(S.time, "localtime", lambda: noon):
+            self.assertTrue(c._night())
+        # 中午通常都在 -> 不算 night
+        m2 = S.Mood()
+        for _ in range(40):
+            m2.note_activity(12, True)
+        c.mood = m2
+        with mock.patch.object(S.time, "localtime", lambda: noon):
+            self.assertFalse(c._night())
+
+    def test_schedule_chart(self):
+        m = S.Mood()
+        for h in range(24):
+            for _ in range(35):
+                m.note_activity(h, 9 <= h < 19)          # 上班族
+        txt = m.schedule_text()
+        # "0" + 24 格 + "23"
+        self.assertEqual(len(txt), 27, txt)
+        self.assertEqual(txt[1 + 9], "█", "9 点该标常在")
+        self.assertEqual(txt[1 + 3], "░", "3 点该标不在")
+        self.assertIn("观察", S.Mood().schedule_text(), "没样本时该说还在观察")
+
+    def test_round_trips_through_json(self):
+        c = S.CompanionSource()
+        c.mood.note_activity(9, True)
+        c.mood.note_activity(9, True)
+        c.save()
+        again = S.CompanionSource()
+        self.assertEqual(again.mood.seen_slots[9], 2)
+        self.assertEqual(again.mood.busy_slots[9], 2)
+
+
+class TestAccessories(unittest.TestCase):
+    def test_table_is_well_formed(self):
+        self.assertIn("none", A.ACCESSORIES)
+        self.assertIsNone(A.ACCESSORIES["none"][1], "none 不该有绘制函数")
+        for aid, (label, fn) in A.ACCESSORIES.items():
+            with self.subTest(aid=aid):
+                self.assertTrue(label, "每个配饰都要有显示名")
+                if aid != "none":
+                    self.assertTrue(callable(fn))
+
+    def test_every_accessory_draws_something(self):
+        from PIL import ImageChops
+        base = P.render_pet("idle", 0.25)
+        for aid in A.accessory_ids():
+            if aid == "none":
+                continue
+            with self.subTest(aid=aid):
+                img = base.copy()
+                bb = A.character_box(img)
+                drew = A.draw_accessory(img, aid, (bb[0] + bb[2]) / 2,
+                                        float(bb[1]), float(bb[3] - bb[1]), 1.0, 0.25)
+                self.assertTrue(drew, f"{aid} 没画上")
+                diff = ImageChops.difference(img.convert("RGB"),
+                                             base.convert("RGB")).getbbox()
+                self.assertIsNotNone(diff, f"{aid} 画了但画面没变")
+
+    def test_accessories_stay_inside_the_canvas(self):
+        """配饰不能顶出画布 —— 头顶到画布顶只剩 26px。
+
+        第一版尖顶帽用了 bh*0.34 ≈ 52px，直接被切掉一截。
+        """
+        base = P.render_pet("idle", 0.25)
+        for aid in A.accessory_ids():
+            if aid == "none":
+                continue
+            with self.subTest(aid=aid):
+                img = base.copy()
+                bb = A.character_box(img)
+                A.draw_accessory(img, aid, (bb[0] + bb[2]) / 2,
+                                 float(bb[1]), float(bb[3] - bb[1]), 1.0, 0.25)
+                nb = A.character_box(img)
+                self.assertGreater(nb[1], 0, f"{aid} 被画布顶部切掉了")
+
+    def test_unknown_id_is_a_no_op(self):
+        img = P.render_pet("idle", 0.25)
+        for bad in ("", "不存在", None):
+            with self.subTest(bad=bad):
+                self.assertFalse(A.draw_accessory(img, bad, 124, 26, 155))
+
+    def test_character_box_excludes_the_glow(self):
+        """getbbox() 会把光晕算进去，比角色本体高 2~10px（各皮肤不同）。
+        照它定位的话所有配饰都会飘在头上。"""
+        for sid in ("dafeiyu", "kun-like", "matcha-sunny"):
+            frames = P.load_skin(sid).frames("idle")
+            if not frames:
+                continue
+            img = frames[0][0]
+            with self.subTest(skin=sid):
+                raw = img.getbbox()
+                body = A.character_box(img)
+                self.assertGreaterEqual(body[1], raw[1],
+                                        "本体不该比整体 bbox 更高")
+                self.assertLess(body[3] - body[1], raw[3] - raw[1],
+                                "本体高度该比整体小（排除了光晕/落影）")
+
+    def test_accessory_works_on_every_skin(self):
+        from PIL import ImageChops
+        for sid in ("dafeiyu", "kun-like", "matcha-sunny"):
+            frames = P.load_skin(sid).frames("idle")
+            if not frames:
+                continue
+            with self.subTest(skin=sid):
+                img = frames[0][0].copy()
+                bb = A.character_box(img)
+                self.assertTrue(A.draw_accessory(img, "hat", (bb[0] + bb[2]) / 2,
+                                                 float(bb[1]), float(bb[3] - bb[1])))
+
+
+class TestChat(unittest.TestCase):
+    """本地对话。用桩服务器验证协议 —— 本机没模型也能测。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import json as _json
+        import socketserver
+        import threading as _th
+
+        cls.seen = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path.endswith("/models"):
+                    body = _json.dumps({"data": [{"id": "fake-model"}]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                cls.seen["body"] = _json.loads(self.rfile.read(n).decode())
+                cls.seen["path"] = self.path
+                body = _json.dumps(
+                    {"choices": [{"message": {"content": "在呢"}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        cls.srv = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        _th.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_normalize_base_accepts_all_the_forms(self):
+        for raw, want in [
+            ("127.0.0.1:11434", "http://127.0.0.1:11434/v1"),
+            ("http://a:1/", "http://a:1/v1"),
+            ("http://a:1/v1/", "http://a:1/v1"),
+            ("http://a:1/v1/chat/completions", "http://a:1/v1"),
+            ("https://a", "https://a/v1"),
+            ("", ""),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(C.normalize_base(raw), want)
+
+    def test_list_models(self):
+        self.assertEqual(C.list_models(self.base), ["fake-model"])
+
+    def test_list_models_reports_unreachable(self):
+        with self.assertRaises(C.ChatError):
+            C.list_models("http://127.0.0.1:1", timeout=1.0)
+
+    def test_ask_sends_the_right_request(self):
+        cli = C.ChatClient(self.base, "fake-model")
+        self.assertTrue(cli.configured)
+        reply = cli.ask("在吗", context="状态是执行中")
+        self.assertEqual(reply, "在呢")
+        self.assertTrue(self.seen["path"].endswith("/chat/completions"))
+        body = self.seen["body"]
+        self.assertEqual(body["model"], "fake-model")
+        self.assertIs(body["stream"], False, "不做流式")
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertIn("执行中", body["messages"][0]["content"])
+        self.assertEqual(body["messages"][-1],
+                         {"role": "user", "content": "在吗"})
+
+    def test_history_is_kept_and_reset(self):
+        cli = C.ChatClient(self.base, "fake-model")
+        cli.ask("一")
+        cli.ask("二")
+        self.assertEqual(len(self.seen["body"]["messages"]), 4,
+                         "第二轮该带上第一轮")
+        cli.reset()
+        self.assertEqual(cli.history, [])
+
+    def test_unconfigured_raises_readable_errors(self):
+        for cli, text, want in [
+            (C.ChatClient("", "m"), "x", "地址"),
+            (C.ChatClient(self.base, ""), "x", "模型"),
+            (C.ChatClient(self.base, "m"), "", "说话"),
+        ]:
+            with self.subTest(want=want):
+                with self.assertRaises(C.ChatError) as cm:
+                    cli.ask(text)
+                self.assertIn(want, str(cm.exception))
 
 
 class TestConfig(unittest.TestCase):

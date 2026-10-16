@@ -14,7 +14,7 @@
 
 #define AppName "DSH 桌宠"
 #define AppExe "DSH-Pet.exe"
-#define AppVersion "1.3.1"
+#define AppVersion "1.4.0"
 #define AppPublisher "kmm331752-ai"
 #define AppUrl "https://github.com/kmm331752-ai/dsh-pet"
 

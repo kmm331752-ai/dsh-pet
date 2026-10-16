@@ -33,6 +33,9 @@ from pet_sources import *          # 也带出 Mood
 from pet_system import *
 from pet_types import Snapshot, TaskInfo
 
+import pet_accessories
+import pet_chat
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PetApp:
@@ -85,6 +88,14 @@ class PetApp:
         self.detail = bool(self.cfg.get("show_detail", False))
         self.privacy = bool(self.cfg.get("privacy", False))
         self.sound = bool(self.cfg.get("sound", True))
+        # 配饰 id。配置里存了个不认识的（改过文件、降级过版本）就当没戴。
+        _acc = str(self.cfg.get("accessory", pet_accessories.DEFAULT_ACCESSORY))
+        self.accessory = _acc if _acc in pet_accessories.ACCESSORIES \
+            else pet_accessories.DEFAULT_ACCESSORY
+        # 本地对话的端点与模型（空 = 没配，功能关着）
+        self.chat_url = str(self.cfg.get("chat_url", "") or "")
+        self.chat_model = str(self.cfg.get("chat_model", "") or "")
+        self.chat = pet_chat.ChatClient(self.chat_url, self.chat_model)
         self.frame_i = 0
         self.snap = Snapshot(state=args.force_state or "idle")
         self._card_cache = (None, None)
@@ -149,6 +160,9 @@ class PetApp:
         cfg["sound"] = self.sound
         cfg["skin"] = self.skin.name
         cfg["scale"] = round(self.scale, 3)
+        cfg["accessory"] = self.accessory
+        cfg["chat_url"] = self.chat_url
+        cfg["chat_model"] = self.chat_model
         try:
             with open(config_path(), "w", encoding="utf-8") as fh:
                 json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -241,8 +255,12 @@ class PetApp:
         self._skin_menu = self.tk.Menu(self.menu, tearoff=0)
         self.menu.add_cascade(label="皮肤", menu=self._skin_menu)
         self._rebuild_skin_menu()
+        self._acc_menu = self.tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="配饰", menu=self._acc_menu)
+        self._rebuild_acc_menu()
         self.menu.add_separator()
         self.menu.add_command(label="设置…", command=self._open_settings)
+        self.menu.add_command(label="和大肥鱼说话…", command=self._open_chat)
         self.menu.add_command(label="导出相处记录…", command=self._export_record)
         self.menu.add_command(label="检查更新…", command=self._check_update_async)
         self.menu.add_command(label="退出", command=self._quit)
@@ -340,6 +358,19 @@ class PetApp:
         bar.pack(fill="x", padx=14, pady=(8, 12))
         tk.Button(bar, text="删除", command=do).pack(side="right")
         tk.Button(bar, text="取消", command=win.destroy).pack(side="right", padx=6)
+
+    def _rebuild_acc_menu(self) -> None:
+        self._acc_menu.delete(0, "end")
+        self.var_acc = self.tk.StringVar(value=self.accessory)
+        for aid in pet_accessories.accessory_ids():
+            self._acc_menu.add_radiobutton(
+                label=pet_accessories.accessory_label(aid), value=aid,
+                variable=self.var_acc,
+                command=lambda a=aid: self._switch_accessory(a))
+
+    def _switch_accessory(self, aid: str) -> None:
+        self.accessory = aid if aid in pet_accessories.ACCESSORIES else "none"
+        self._save_config()
 
     def _switch_skin(self, skin_id: str) -> None:
         new = load_skin(skin_id)
@@ -450,6 +481,77 @@ class PetApp:
         tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
                                                 sticky="ew", padx=14, pady=8)
         row += 1
+        tk.Label(win, text="本地对话（可选）", font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 2))
+        row += 1
+
+        v_url = tk.StringVar(value=self.chat_url)
+        v_model = tk.StringVar(value=self.chat_model)
+        tk.Label(win, text="地址（Ollama 默认 http://127.0.0.1:11434）",
+                 anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
+                                             sticky="w", padx=14)
+        row += 1
+        tk.Entry(win, textvariable=v_url, width=34).grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=14)
+        row += 1
+        tk.Label(win, text="模型名（Ollama 用 ollama list 看）",
+                 anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
+                                             sticky="w", padx=14, pady=(4, 0))
+        row += 1
+        tk.Entry(win, textvariable=v_model, width=34).grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=14)
+        row += 1
+
+        chat_status = tk.Label(win, text="", anchor="w", fg="#666", wraplength=300,
+                               justify="left")
+        chat_status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 0))
+        row += 1
+
+        def save_chat():
+            self.chat_url = v_url.get().strip()
+            self.chat_model = v_model.get().strip()
+            self.chat.base = pet_chat.normalize_base(self.chat_url)
+            self.chat.model = self.chat_model
+            self._save_config()
+            if not self.chat.configured:
+                chat_status.configure(text="填完地址和模型才能用", fg="#B93B37")
+            else:
+                chat_status.configure(
+                    text=f"已保存：{self.chat.model} @ {self.chat.base}", fg="#2E9E63")
+
+        def probe():
+            """探一下端点，顺便把模型名列出来。"""
+            url = v_url.get().strip()
+            if not url:
+                chat_status.configure(text="先填地址", fg="#B93B37")
+                return
+            chat_status.configure(text="正在连…", fg="#666")
+            win.update_idletasks()
+
+            def work():
+                try:
+                    models = pet_chat.list_models(url)
+                    if models:
+                        self._tray_actions.append(
+                            f"chat-models:{','.join(models[:12])}")
+                    else:
+                        self._tray_actions.append("chat-probe-ok:")
+                except Exception as exc:                 # noqa: BLE001
+                    self._tray_actions.append(f"chat-probe-fail:{exc}")
+
+            threading.Thread(target=work, name="dsh-pet-probe", daemon=True).start()
+
+        chatbar = tk.Frame(win)
+        chatbar.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
+        tk.Button(chatbar, text="保存", command=save_chat).pack(side="left")
+        tk.Button(chatbar, text="测试连接", command=probe).pack(side="left", padx=6)
+        tk.Button(chatbar, text="和大肥鱼说话…",
+                  command=self._open_chat).pack(side="left")
+        row += 1
+
+        tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
+                                                sticky="ew", padx=14, pady=8)
+        row += 1
         tk.Label(win, text="相处记录", font=("Microsoft YaHei UI", 10, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
         row += 1
@@ -457,7 +559,8 @@ class PetApp:
         m = self.companion.mood if self.companion else Mood()
         info = (f"陪你第 {m.days_together} 天 · {m.mood_label}\n"
                 f"被戳 {m.pokes} 次 · 被拖 {m.drags} 次 · 被喂 {m.feeds} 次\n"
-                f"亲密度 {m.affection * 100:.0f}% · 精力 {m.energy * 100:.0f}%")
+                f"亲密度 {m.affection * 100:.0f}% · 精力 {m.energy * 100:.0f}%\n"
+                f"{m.schedule_text()}")
         tk.Label(win, text=info, justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 6))
         row += 1
@@ -598,6 +701,48 @@ class PetApp:
             elif isinstance(act, str) and act.startswith("skin-error:"):
                 self._say("装不上", 2.6)
                 print(f"[skin] 安装失败：{act.split(':', 1)[1]}", file=sys.stderr)
+            elif isinstance(act, str) and act.startswith("chat-probe-ok:"):
+                self._set_chat_status("连上了，但这个端点没报告任何模型", "#C97A22")
+            elif isinstance(act, str) and act.startswith("chat-models:"):
+                names = act.split(":", 1)[1]
+                self._set_chat_status(f"连上了。可用模型：{names}", "#2E9E63")
+                # 只有一个模型且还没填，就顺手填上
+                if not self.chat_model and "," not in names:
+                    self.chat_model = names
+                    self.chat.model = names
+                    self._save_config()
+            elif isinstance(act, str) and act.startswith("chat-probe-fail:"):
+                self._set_chat_status(f"连不上：{act.split(':', 1)[1]}", "#B93B37")
+            elif isinstance(act, str) and act.startswith("chat-reply:"):
+                reply = act.split(":", 1)[1]
+                self._say(reply, max(5.0, min(14.0, len(reply) * 0.28)))
+                w = getattr(self, "_chat_win", None)
+                if w is not None:
+                    try:
+                        # 把"…"那行换成真回复
+                        txt = [c for c in w.winfo_children()
+                               if c.winfo_class() == "Text"][0]
+                        txt.configure(state="normal")
+                        txt.delete("end-3l", "end-1l")
+                        txt.insert("end", f"她：{reply}\n\n", "her")
+                        txt.see("end")
+                        txt.configure(state="disabled")
+                    except Exception:                    # noqa: BLE001
+                        pass
+            elif isinstance(act, str) and act.startswith("chat-error:"):
+                self._say("说不出来…", 3.0)
+                w = getattr(self, "_chat_win", None)
+                if w is not None:
+                    try:
+                        txt = [c for c in w.winfo_children()
+                               if c.winfo_class() == "Text"][0]
+                        txt.configure(state="normal")
+                        txt.delete("end-3l", "end-1l")
+                        txt.insert("end", f"（{act.split(':', 1)[1]}）\n\n", "sys")
+                        txt.see("end")
+                        txt.configure(state="disabled")
+                    except Exception:                    # noqa: BLE001
+                        pass
 
     # -- 番茄钟 / 专注 / 截图模式 -------------------------------------------
     def _toggle_focus(self) -> None:
@@ -682,8 +827,116 @@ class PetApp:
         except Exception as exc:                         # noqa: BLE001
             log_error("导出相处记录失败", exc)
 
+    # -- 本地对话 -----------------------------------------------------------
+    def _set_chat_status(self, text: str, color: str = "#666") -> None:
+        """把「测试连接」的结果写到设置窗口那行状态上。窗口关了就算了。"""
+        w = getattr(self, "_settings_win", None)
+        if w is None:
+            return
+        try:
+            for child in w.winfo_children():
+                if child.winfo_class() == "Label" and child.cget("wraplength") == 300:
+                    child.configure(text=text, fg=color)
+                    return
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _chat_context(self) -> str:
+        """给她一点「你现在在干什么」的背景，好接得上话。"""
+        try:
+            s = self.snap
+            bits = []
+            if s.state and s.state != "idle":
+                bits.append(f"状态是{PALETTE.get(s.state, {}).get('label', s.state)}")
+            if s.title:
+                bits.append(f"在忙「{s.title[:30]}」")
+            m = self.companion.mood if self.companion else None
+            if m:
+                bits.append(f"认识 {m.days_together} 天")
+            return "，".join(bits)
+        except Exception:                                # noqa: BLE001
+            return ""
+
+    def _open_chat(self) -> None:
+        tk = self.tk
+        if getattr(self, "_chat_win", None) is not None:
+            try:
+                self._chat_win.deiconify()
+                self._chat_win.lift()
+                return
+            except Exception:                            # noqa: BLE001
+                self._chat_win = None
+
+        win = tk.Toplevel(self.root)
+        self._chat_win = win
+        win.title("和大肥鱼说话")
+        win.geometry("440x420")
+        win.attributes("-topmost", True)
+
+        log = tk.Text(win, wrap="word", state="disabled", height=14,
+                      bg="#1a1d26", fg="#e8ecf2", relief="flat",
+                      font=("Microsoft YaHei UI", 10))
+        log.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        log.tag_configure("me", foreground="#7FB3E8", justify="right")
+        log.tag_configure("her", foreground="#F2A65A")
+        log.tag_configure("sys", foreground="#8a92a4")
+
+        def put(who: str, text: str) -> None:
+            log.configure(state="normal")
+            tag = {"me": "me", "her": "her"}.get(who, "sys")
+            prefix = {"me": "我：", "her": "她："}.get(who, "")
+            log.insert("end", f"{prefix}{text}\n\n", tag)
+            log.see("end")
+            log.configure(state="disabled")
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(0, 4))
+        entry = tk.Entry(bar, font=("Microsoft YaHei UI", 10))
+        entry.pack(side="left", fill="x", expand=True)
+        entry.focus_set()
+
+        def send(_e=None):
+            text = entry.get().strip()
+            if not text:
+                return
+            entry.delete(0, "end")
+            put("me", text)
+            if not self.chat.configured:
+                put("sys", f"还没配本地模型。\n当前地址：{self.chat.base or '（空）'}\n"
+                           f"当前模型：{self.chat.model or '（空）'}\n"
+                           f"右键 → 设置 → 本地对话，填一个再试。")
+                return
+            put("sys", "…")
+            win.update_idletasks()
+
+            def work():
+                try:
+                    reply = self.chat.ask(text, self._chat_context())
+                    self._tray_actions.append(f"chat-reply:{reply}")
+                except Exception as exc:                 # noqa: BLE001
+                    log_error("本地对话失败", exc)
+                    self._tray_actions.append(f"chat-error:{exc}")
+
+            threading.Thread(target=work, name="dsh-pet-chat", daemon=True).start()
+
+        entry.bind("<Return>", send)
+        tk.Button(bar, text="说", width=6, command=send).pack(side="left", padx=(6, 0))
+
+        foot = tk.Frame(win)
+        foot.pack(fill="x", padx=10, pady=(0, 10))
+        tk.Button(foot, text="清空对话",
+                  command=lambda: (self.chat.reset(), log.configure(state="normal"),
+                                   log.delete("1.0", "end"),
+                                   log.configure(state="disabled"))).pack(side="left")
+        tk.Button(foot, text="关闭", command=lambda: (
+            win.destroy(), setattr(self, "_chat_win", None))).pack(side="right")
+
+        if self.chat.configured:
+            put("sys", f"用 {self.chat.model} @ {self.chat.base}")
+        else:
+            put("sys", "还没配本地模型 —— 右键 → 设置 → 本地对话。")
+
     def _show_error_log(self) -> None:
-        """看出错日志。没有日志就说没有 —— 别弹一个空白窗口让人以为坏了。"""
         tk = self.tk
         text = read_error_log(60)
         win = tk.Toplevel(self.root)
@@ -1052,6 +1305,10 @@ class PetApp:
                 if snap.state == "failed" and self._last_state != "failed":
                     self._play_sound("failed")
                 self._last_state = snap.state
+                # 喂作息统计：DSH 有活在跑就说明你在。她据此学到你几点在、几点不在，
+                # 而不是死按 23:00~07:00 判断夜晚（夜班的人凌晨也在）。
+                if self.companion is not None:
+                    self.companion.observe(snap.state in ACTIVE_STATES)
                 # DSH 那边没活干（空闲或压根没会话）→ 交给陪伴模式，她自己过日子。
                 # 有活在跑时反过来把她叫醒，免得 DSH 都开工了她还在睡。
                 if snap.state in ("idle", "offline") and self.companion is not None:
@@ -1151,6 +1408,20 @@ class PetApp:
                 ov = overlay_for(ov_kind, self.snap.phase)
                 if ov is not None:
                     sprite = Image.alpha_composite(sprite, ov)
+            # 配饰同理，也画在所有皮肤之上。
+            # 位置从角色**本体**的包围盒推（character_box 用 alpha 阈值把光晕
+            # 和落影排除掉）—— 用 getbbox() 的话光晕会比头顶高 2~10px
+            # （各皮肤不一样），配饰就全飘在头上。
+            if self.accessory and self.accessory != "none":
+                bb = pet_accessories.character_box(sprite)
+                if bb:
+                    pet_accessories.draw_accessory(
+                        sprite, self.accessory,
+                        cx=(bb[0] + bb[2]) / 2.0,
+                        top=float(bb[1]),
+                        bh=float(bb[3] - bb[1]),
+                        s=1.0,                           # 帧已是最终分辨率
+                        phase=self.snap.phase)
             if self.snap.mirror:                         # 看向左边：水平翻转
                 sprite = ImageOps.mirror(sprite)
             dots = session_dots(self.snap.tasks)         # 多任务时脚边排一排圆点
