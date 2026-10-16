@@ -24,6 +24,8 @@ import unittest.mock as mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dsh_pet as P  # noqa: E402
+import pet_base as B  # noqa: E402
+import pet_sources as S  # noqa: E402
 
 
 class TestStates(unittest.TestCase):
@@ -99,8 +101,11 @@ class TestCompanionStateMachine(unittest.TestCase):
         self.c.mouse_at = 0.0 if mouse_at is None else mouse_at
         if mouse_x is not None:
             self.c.mouse_x = mouse_x
-        with mock.patch.object(P, "idle_seconds", lambda v=idle: v), \
-             mock.patch.object(P.CompanionSource, "_night", lambda _s, n=night: n):
+        # 注意补丁打在哪：idle_seconds 和 _night 都是 **pet_sources** 里的名字。
+        # 拆文件之前是 P.idle_seconds，拆开后 poll 解析的是 pet_sources 的全局，
+        # 打 dsh_pet 那份不起作用（踩过：状态机测试全返回 idle）。
+        with mock.patch.object(S, "idle_seconds", lambda v=idle: v), \
+             mock.patch.object(S.CompanionSource, "_night", lambda _s, n=night: n):
             return self.c.poll()
 
     def test_idle_when_active(self):
@@ -294,10 +299,14 @@ class TestSourceSanity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import re
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "dsh_pet.py")
-        with open(path, encoding="utf-8") as fh:
-            cls.src = fh.read()
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # 拆文件之后要扫全部模块，不能只看 dsh_pet.py ——
+        # 台词表和菜单都在别的模块里（踩过：只扫主文件导致全部误报）。
+        cls.src = ""
+        for name in ("pet_base.py", "pet_types.py", "pet_render.py",
+                     "pet_sources.py", "pet_system.py", "dsh_pet.py"):
+            with open(os.path.join(root, name), encoding="utf-8") as fh:
+                cls.src += fh.read() + "\n"
         cls.re = re
 
     def test_every_cascade_menu_is_created(self):
@@ -349,14 +358,19 @@ class TestErrorLog(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dsh-pet-err-")
-        self._orig = P.ERROR_LOG
-        P.ERROR_LOG = os.path.join(self.tmp, "pet_error.log")
-        P._last_stderr.clear()
+        # 改 data_dir 而不是 ERROR_LOG —— 拆文件之后常量会被复制进各模块，
+        # 改 dsh_pet 里的那份不影响 pet_base 里的，会静默失效。
+        self._orig_data_dir = B.data_dir
+        B.data_dir = lambda: self.tmp
+        B._last_stderr.clear()
 
     def tearDown(self):
-        P.ERROR_LOG = self._orig
-        P._last_stderr.clear()
+        B.data_dir = self._orig_data_dir
+        B._last_stderr.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _log_path(self) -> str:
+        return B.error_log_path()
 
     def test_missing_log_reads_empty(self):
         self.assertEqual(P.read_error_log(), "")
@@ -386,7 +400,7 @@ class TestErrorLog(unittest.TestCase):
                 except RuntimeError as exc:
                     P.log_error("同一个位置", exc)
         self.assertEqual(len([ln for ln in buf.getvalue().splitlines() if ln.strip()]), 1)
-        with open(P.ERROR_LOG, encoding="utf-8") as fh:
+        with open(self._log_path(), encoding="utf-8") as fh:
             self.assertEqual(fh.read().count("同一个位置"), 50)
 
     def test_log_is_truncated_instead_of_growing_forever(self):
@@ -395,7 +409,7 @@ class TestErrorLog(unittest.TestCase):
                 raise RuntimeError("x" * 400)
             except RuntimeError as exc:
                 P.log_error(f"填充 {i}", exc)
-        size = os.path.getsize(P.ERROR_LOG)
+        size = os.path.getsize(self._log_path())
         self.assertLess(size, P.ERROR_LOG_MAX * 1.5,
                         "日志没有截断，长期运行会无限增长")
 
@@ -421,8 +435,25 @@ class TestErrorLog(unittest.TestCase):
 
 class TestConfig(unittest.TestCase):
     def test_paths_are_absolute(self):
-        for p in (P.CONFIG_PATH, P.MOOD_PATH, P.ASSETS):
+        for p in (B.config_path(), B.mood_path(), B.error_log_path(),
+                  B.lines_path(), B.ASSETS):
             self.assertTrue(os.path.isabs(p), p)
+
+    def test_paths_follow_data_dir(self):
+        """所有可变路径都要从 data_dir 派生 —— 改一处全都跟着变。
+
+        拆文件时踩过：这些原来是模块级常量，拆开后常量被复制进各模块，
+        改 dsh_pet 里那份不影响 pet_base 里那份，测试的临时目录隔离
+        就静默失效了（表现是测试往仓库里写文件）。改成函数才对。
+        """
+        orig = B.data_dir
+        B.data_dir = lambda: r"X:\probe"
+        try:
+            for fn in (B.config_path, B.mood_path, B.error_log_path, B.lines_path):
+                with self.subTest(fn=fn.__name__):
+                    self.assertTrue(fn().startswith(r"X:\probe"), fn())
+        finally:
+            B.data_dir = orig
 
     def test_assets_exist(self):
         self.assertTrue(os.path.isdir(P.ASSETS))

@@ -28,6 +28,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dsh_pet as P  # noqa: E402
+import pet_base as B  # noqa: E402
 
 
 def tk_available() -> bool:
@@ -50,20 +51,19 @@ class TestAppSmoke(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dsh-pet-smoke-")
-        self._orig = (P.CONFIG_PATH, P.MOOD_PATH, P.data_dir)
-        # 别碰真实目录 —— 测试跑完就删。
-        # data_dir 也要换：_export_record 是按它拼输出路径的，
-        # 不换的话测试会把 相处记录.png 写进仓库根目录（踩过）。
-        P.CONFIG_PATH = os.path.join(self.tmp, "pet_config.json")
-        P.MOOD_PATH = os.path.join(self.tmp, "pet_mood.json")
-        P.data_dir = lambda: self.tmp
+        # 只改一处：pet_base.data_dir 是所有可变路径的唯一真实来源，
+        # 配置、相处记录、出错日志、台词包都从它派生。
+        # （拆文件之前是改 CONFIG_PATH/MOOD_PATH 那几个常量 ——
+        #   拆开之后常量会被复制进各模块，改一处不影响别处，所以改成了函数。）
+        self._orig_data_dir = B.data_dir
+        B.data_dir = lambda: self.tmp
         # 托盘：把 pystray 从模块表里摘掉，import 会失败并被 _start_tray 吞掉。
         # 否则测试期间会真的弹一个托盘图标，而且它起线程，退出时不干净。
         self._saved_pystray = sys.modules.pop("pystray", None)
         sys.modules["pystray"] = None                    # type: ignore[assignment]
 
     def tearDown(self):
-        P.CONFIG_PATH, P.MOOD_PATH, P.data_dir = self._orig
+        B.data_dir = self._orig_data_dir
         sys.modules.pop("pystray", None)
         if self._saved_pystray is not None:
             sys.modules["pystray"] = self._saved_pystray
