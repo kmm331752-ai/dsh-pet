@@ -1594,13 +1594,18 @@ class TestObservedMemory(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="dsh-pet-obs-")
         self._orig = B.data_dir
         B.data_dir = lambda: self.tmp
+        # lang 要钉成 zh。不钉的话 PetApp.__init__ 会解析 auto，
+        # 而 CI runner 是英文环境 —— 于是 _current 变 en，
+        # **后面的 TestSchedule 断言中文就挂**（CI 抓到过）。
+        # 自己建的 App 会把语言全局改掉，这是它的副作用。
         with open(B.config_path(), "w", encoding="utf-8") as fh:
-            json.dump({"skin": "dafeiyu", "companion": True}, fh)
+            json.dump({"skin": "dafeiyu", "companion": True, "lang": "zh"}, fh)
         self._saved = sys.modules.pop("pystray", None)
         sys.modules["pystray"] = None
 
     def tearDown(self):
         B.data_dir = self._orig
+        I.set_language("zh")                             # 别把语言漏出去
         sys.modules.pop("pystray", None)
         if self._saved is not None:
             sys.modules["pystray"] = self._saved
