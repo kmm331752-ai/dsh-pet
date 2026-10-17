@@ -318,6 +318,9 @@ EN = {
     "输出": "Output",
     "大肥鱼（内置）": "Dafeiyu (built-in)",
 
+    # ── 贴边隐藏 ──
+    "贴边自动隐藏（鼠标靠近才出来）": "Auto-hide at screen edge (peek on hover)",
+
     # ── 皮肤预览 ──
     "预览…": "Preview…",
     "皮肤预览": "Skin preview",

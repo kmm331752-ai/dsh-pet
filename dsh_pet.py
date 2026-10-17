@@ -164,6 +164,7 @@ class PetApp:
         self._ghost = False           # 截图模式：连托盘一起藏
         self._autohide = bool(self.cfg.get("autohide", False))
         self._peek_until = 0.0        # 贴边隐藏后探出来的时刻
+        self._hidden_at = None        # 已经藏起来时贴的是哪一边（None = 露着）
         self._attention_at = 0.0      # 上次"等待提醒"挪窗口的时刻
         self._long_press_job = None
         # _drop_job 必须在这里初始化。原来是"用到才建"，而 _attention()
@@ -210,6 +211,12 @@ class PetApp:
         cfg["chat_url"] = self.chat_url
         cfg["chat_model"] = self.chat_model
         cfg["lang"] = self.lang_pref
+        # 下面三个以前**只读不写** —— 菜单里能勾，重启就变回去，
+        # 用户只会觉得"我开的那个开关自己关了"。
+        # 教训：加一个配置项时，读和写要一起加，别只加一半。
+        cfg["focus"] = self.focus_mode
+        cfg["autohide"] = self._autohide
+        cfg["companion"] = self.companion is not None
         try:
             with open(config_path(), "w", encoding="utf-8") as fh:
                 json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -303,6 +310,9 @@ class PetApp:
         self.var_focus = self.tk.BooleanVar(value=self.focus_mode)
         self.menu.add_checkbutton(label=t("专注模式（安静待机不打扰）"),
                                   variable=self.var_focus, command=self._toggle_focus)
+        self.var_autohide = self.tk.BooleanVar(value=self._autohide)
+        self.menu.add_checkbutton(label=t("贴边自动隐藏（鼠标靠近才出来）"),
+                                  variable=self.var_autohide, command=self._toggle_autohide)
         self.menu.add_separator()
         self._pomo_menu = self.tk.Menu(self.menu, tearoff=0)
         for mins in POMODORO_CHOICES:
@@ -840,6 +850,13 @@ class PetApp:
         if self.companion is not None and self.focus_mode:
             self.companion.bubble_until = 0.0
             self.companion.bubble = ""
+        self._save_config()
+
+    def _toggle_autohide(self) -> None:
+        """贴边自动隐藏。关掉的时候要顺手把藏起来的她放出来。"""
+        self._autohide = bool(self.var_autohide.get())
+        if not self._autohide and self._hidden_at is not None:
+            self._unhide()
         self._save_config()
 
     def _toggle_ghost(self) -> None:
@@ -1537,6 +1554,12 @@ class PetApp:
 
     def _on_press(self, e):
         self._cancel_long_press()
+        # 藏着的时候点那 12 像素 = 把她叫出来，不算拖动
+        if self._hidden_at is not None:
+            self._peek()
+            self._drag = None
+            self._moved = True                           # 别让 release 再当单击处理
+            return
         self._drag = (e.x_root, e.y_root,
                       self.root.winfo_x(), self.root.winfo_y())
         self._moved = False
@@ -1756,7 +1779,99 @@ class PetApp:
             self._health_tick()
         except Exception as exc:                         # noqa: BLE001
             log_error("健康提醒异常", exc)
+        try:
+            self._autohide_tick()
+        except Exception as exc:                         # noqa: BLE001
+            log_error("贴边隐藏异常", exc)
         self.root.after(POLL_MS, self._poll)
+
+    def _autohide_tick(self) -> None:
+        """贴边自动隐藏：贴在屏幕边上就缩进去，鼠标靠近再探出来。
+
+        只在**拖到边上贴住之后**才生效（grab_edge 有值）—— 她自己在屏幕中间
+        溜达的时候不该突然消失。
+
+        鼠标靠近的判定用整个窗口的外扩框，不是只看露出来的那一条：
+        藏在左边时窗口其实大部分在屏幕外，用窗口矩形判鼠标永远"不在附近"。
+        """
+        if not self._autohide:
+            # 关掉的时候要把已经藏起来的她放出来，不然窗口留在屏幕外
+            if self._hidden_at is not None:
+                self._unhide()
+            return
+        edge = self.grab_edge
+        if edge is None:
+            if self._hidden_at is not None:
+                self._unhide()
+            return
+        if self._drag is not None or self._moved:
+            return                                       # 正在拖，别抢方向盘
+
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        mx, my = cursor_pos()
+        now = time.time()
+
+        # 鼠标离窗口多近算"靠近"
+        near = (x - AUTOHIDE_NEAR <= mx <= x + self.win_w + AUTOHIDE_NEAR
+                and y - AUTOHIDE_NEAR <= my <= y + self.win_h + AUTOHIDE_NEAR)
+
+        if self._hidden_at is not None:
+            # 已经藏着：鼠标靠近或刚点过就探出来
+            if near or now < self._peek_until:
+                self._unhide()
+            return
+
+        # 露着：鼠标在附近就别藏，走开了才藏
+        if near:
+            return
+        self._hide(edge)
+
+    def _hidden_geometry(self, edge: str) -> tuple:
+        """藏在边上时窗口该在哪。留 AUTOHIDE_PEEK_PX 像素露在外面。"""
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        vx, vy, vw, vh = virtual_screen()
+        if edge == "left":
+            return vx - self.win_w + AUTOHIDE_PEEK_PX, y
+        if edge == "right":
+            return vx + vw - AUTOHIDE_PEEK_PX, y
+        if edge == "top":
+            return x, vy - self.win_h + AUTOHIDE_PEEK_PX
+        return x, y
+
+    def _win_hwnd(self) -> int:
+        """拿窗口句柄。
+
+        优先用 display 的（LayeredDisplay 存的就是顶层窗口句柄）；
+        colorkey 后端没有这个属性，退回 Tk 的 winfo_id()。
+        """
+        h = getattr(self.display, "hwnd", None)
+        if h:
+            return int(h)
+        try:
+            return int(self.root.winfo_id())
+        except Exception:                                # noqa: BLE001
+            return 0
+
+    def _hide(self, edge: str) -> None:
+        hx, hy = self._hidden_geometry(edge)
+        self._hidden_at = edge
+        self._shown_geometry = (self.root.winfo_x(), self.root.winfo_y())
+        # 用 Win32 搬，不用 root.geometry() —— Tk 会把窗口夹回屏幕内，
+        # 想放 -236 实际停在 0（实测）。
+        move_window(self._win_hwnd(), hx, hy)
+
+    def _unhide(self) -> None:
+        self._hidden_at = None
+        g = getattr(self, "_shown_geometry", None)
+        if g is not None:
+            move_window(self._win_hwnd(), g[0], g[1])
+            self._shown_geometry = None
+
+    def _peek(self) -> None:
+        """点她一下：探出来待一会儿。"""
+        self._peek_until = time.time() + AUTOHIDE_PEEK_S
+        if self._hidden_at is not None:
+            self._unhide()
 
     def _health_tick(self) -> None:
         """久坐 / 喝水提醒 + 把气泡贴到当前 snapshot 上。"""

@@ -65,14 +65,55 @@ def app_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def data_dir() -> str:
-    """可写目录：配置与相处记录放这儿。
+_DATA_DIR_CACHE: Optional[str] = None
 
-    exe 运行时解包目录是临时的，配置必须落在 exe 旁边才留得住。
+
+def _writable(path: str) -> bool:
+    """这个目录能不能写。真写一个文件试，不靠权限位猜。"""
+    probe = os.path.join(path, ".dsh-pet-write-test")
+    try:
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        os.remove(probe)
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def data_dir() -> str:
+    """可写目录：配置、相处记录、导出的图都放这儿。
+
+    **三种情况**：
+
+    1. 源码运行 —— 就是脚本所在目录。
+    2. exe 绿色版（解压在能写的地方）—— exe 旁边，配置跟着走，拷走不丢。
+    3. exe 装在 Program Files —— **那儿不可写**，改用 `%APPDATA%\\DSH-Pet`。
+
+    第 3 种是装完才发现的问题：安装包默认装到 `C:\\Program Files\\DSH 桌宠`，
+    而普通权限**写不进去**。后果是配置、相处记录、周报、出错日志全部静默失败
+    （每处都是 `except: pass`），用户看到的是「设置改了重启就丢」，
+    而且连出错日志都没有 —— 无从查起。
+
+    实测：装完之后程序旁边一个 `pet_*.json` 都没有。
     """
+    global _DATA_DIR_CACHE
+    if _DATA_DIR_CACHE is not None:
+        return _DATA_DIR_CACHE
     if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if _writable(exe_dir):
+            _DATA_DIR_CACHE = exe_dir
+            return exe_dir
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "DSH-Pet")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:                                # noqa: BLE001
+            d = exe_dir                                  # 实在没辙就还回原地
+        _DATA_DIR_CACHE = d
+        return d
+    _DATA_DIR_CACHE = os.path.dirname(os.path.abspath(__file__))
+    return _DATA_DIR_CACHE
 
 
 # ── 可变路径 ────────────────────────────────────────────────────────────────
@@ -264,6 +305,12 @@ ANNOY_AFTER = 5                  # 连续摸几次会烦
 ANNOY_WINDOW = 6.0               # 连续摸的判定窗口（秒）
 ANNOY_S = 2.6                    # 烦多久
 EDGE_SNAP = 6                    # 拖到离屏幕边缘多近算「抓住」（像素）
+# ── 贴边自动隐藏 ──
+# 拖到边上贴住之后，人走开她就缩进去；鼠标靠近再探出来。
+# 注意：这三个是**只在贴边后**才生效的，她自己溜达到屏幕中间时不会突然消失。
+AUTOHIDE_PEEK_PX = 12            # 藏起来时留多少像素露在屏幕边上
+AUTOHIDE_NEAR = 70               # 鼠标离窗口多近算「靠近」（会把她叫出来）
+AUTOHIDE_PEEK_S = 4.0            # 点她一下之后，探出来待多久
 GRAVITY = 2.2                    # 松手下落加速度
 TASKBAR_MARGIN = 8               # 落地时离屏幕底部留多少
 GAZE_FRESH = 2.5                 # 鼠标动过多久之内她会看过去（秒）
@@ -420,6 +467,27 @@ class LayeredDisplay:
             self._mem_dc, ctypes.byref(pt_src), 0, ctypes.byref(blend), ULW_ALPHA)
         if not ok:
             raise OSError("UpdateLayeredWindow failed")
+
+
+def move_window(hwnd: int, x: int, y: int) -> bool:
+    """把窗口搬到 (x, y)，**允许搬到屏幕外**。
+
+    Tk 的 `geometry()` 会把窗口夹在可见区域内 —— 实测：想放到 -236，
+    实际停在 0。贴边隐藏需要把窗口大部分挪到屏幕外，Tk 做不到，
+    只能走 Win32 的 SetWindowPos。
+
+    返回是否成功。失败不抛异常：挪不动只是隐藏效果差点，不该让轮询挂掉。
+    """
+    try:
+        SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        return bool(ctypes.windll.user32.SetWindowPos(
+            hwnd, 0, int(x), int(y), 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE))
+    except Exception as exc:                             # noqa: BLE001
+        log_error("移动窗口失败", exc)
+        return False
 
 
 class ColorKeyDisplay:

@@ -25,6 +25,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock as mock
 
@@ -285,6 +286,160 @@ class TestLazyAttributes(E2EBase):
                 missing.append(f"{name} (L{line})")
         self.assertEqual(missing, [],
                          f"这些属性 __init__ 里没建、代码却直接读：{missing}")
+
+
+class TestAutoHideEndToEnd(E2EBase):
+    """贴边自动隐藏。
+
+    这个配置项原来是**死代码** —— 键读进来了，字段建好了，全文没人读它。
+    功能从来没实现过。现在补上了，这里守着它真的动。
+
+    另一个坑：Tk 的 geometry() 会把窗口**夹在可见区域内**，
+    贴边隐藏要把窗口大部分挪到屏幕外，Tk 做不到（想放 -236 实际停在 0）。
+    所以走 Win32 的 SetWindowPos。
+    """
+
+    def _placed(self, app, x, y):
+        """摆好窗口并让 Tk 真正应用 —— geometry() 之后不 update()，
+        winfo_x() 读到的还是旧值（第一版就这么误判的）。"""
+        app.root.geometry(f"+{x}+{y}")
+        app.root.update()
+
+    def _park_at(self, app, edge):
+        """贴到某条边上并让鼠标走开，返回 (vx, vy, vw, vh)。"""
+        app._autohide = True
+        app.grab_edge = edge
+        vx, vy, vw, vh = P.virtual_screen()
+        if edge == "left":
+            self._placed(app, vx, vy + 200)
+            far = (vx + vw - 50, vy + vh - 50)
+        else:
+            self._placed(app, vx + vw - app.win_w, vy + 200)
+            far = (vx + 50, vy + 50)
+        with mock.patch.object(P, "cursor_pos", lambda: far):
+            app._autohide_tick()
+        return vx, vy, vw, vh
+
+    def test_off_by_default_does_nothing(self):
+        app = self.make_app()
+        app.root.update()
+        app._autohide = False
+        app.grab_edge = "left"
+        self._placed(app, 0, 200)
+        app._autohide_tick()
+        self.assertIsNone(app._hidden_at, "关着的时候不该隐藏")
+
+    def test_does_not_hide_when_not_parked_at_an_edge(self):
+        """她自己溜达到屏幕中间时不该突然消失。"""
+        app = self.make_app()
+        app.root.update()
+        app._autohide = True
+        app.grab_edge = None
+        self._placed(app, 600, 300)
+        with mock.patch.object(P, "cursor_pos", lambda: (1900, 1000)):
+            app._autohide_tick()
+        self.assertIsNone(app._hidden_at)
+
+    def test_hides_at_left_edge_when_the_mouse_is_far(self):
+        app = self.make_app()
+        app.root.update()
+        vx, _vy, _vw, _vh = self._park_at(app, "left")
+        self.assertEqual(app._hidden_at, "left")
+        self.assertEqual(app.root.winfo_x(), vx - app.win_w + P.AUTOHIDE_PEEK_PX,
+                         "藏起来后没停在正确位置（Tk 会夹住窗口，要用 SetWindowPos）")
+
+    def test_hides_at_right_edge(self):
+        app = self.make_app()
+        app.root.update()
+        vx, _vy, vw, _vh = self._park_at(app, "right")
+        self.assertEqual(app._hidden_at, "right")
+        self.assertEqual(app.root.winfo_x(), vx + vw - P.AUTOHIDE_PEEK_PX)
+
+    def test_comes_back_when_the_mouse_approaches(self):
+        app = self.make_app()
+        app.root.update()
+        vx, vy, _vw, _vh = self._park_at(app, "left")
+        self.assertEqual(app._hidden_at, "left")
+
+        with mock.patch.object(P, "cursor_pos", lambda: (vx + 30, vy + 260)):
+            app._autohide_tick()
+        self.assertIsNone(app._hidden_at, "鼠标靠近了没出来")
+        self.assertEqual(app.root.winfo_x(), vx)
+
+    def test_click_peeks(self):
+        app = self.make_app()
+        app.root.update()
+        self._park_at(app, "left")
+        self.assertEqual(app._hidden_at, "left")
+
+        app._peek()
+        self.assertIsNone(app._hidden_at)
+        self.assertGreater(app._peek_until, time.time())
+
+    def test_turning_it_off_releases_her(self):
+        """关掉开关时要把已经藏起来的放出来，不然窗口留在屏幕外。"""
+        app = self.make_app()
+        app.root.update()
+        vx, _vy, _vw, _vh = self._park_at(app, "left")
+        self.assertEqual(app._hidden_at, "left")
+
+        app._autohide = False
+        app._autohide_tick()
+        self.assertIsNone(app._hidden_at, "关掉开关后她还藏在屏幕外")
+        self.assertEqual(app.root.winfo_x(), vx)
+
+    def test_press_while_hidden_peeks_instead_of_dragging(self):
+        app = self.make_app()
+        app.root.update()
+        self._park_at(app, "left")
+
+        class E:
+            x_root, y_root, x, y = 100, 100, 5, 5
+        app._on_press(E())
+        self.assertIsNone(app._hidden_at, "点那 12 像素没把她叫出来")
+        self.assertIsNone(app._drag, "藏着的时候点击不该变成拖动")
+
+
+class TestConfigPersistsEndToEnd(E2EBase):
+    """开关类配置要存下来。
+
+    **踩过**：_save_config 只写了 11 个键，而 focus / autohide / companion
+    是「读但从不写回」—— 菜单里能勾，重启就变回去，用户只会觉得
+    「我开的那个开关自己关了」。
+
+    加配置项时读和写要一起加。
+    """
+
+    def test_toggles_survive_a_restart(self):
+        app = self.make_app()
+        app.root.update()
+        app.focus_mode = True
+        app._autohide = True
+        app._save_config()
+
+        with open(B.config_path(), encoding="utf-8-sig") as fh:
+            cfg = json.load(fh)
+        for key in ("focus", "autohide", "companion"):
+            with self.subTest(key=key):
+                self.assertIn(key, cfg, f"配置里没写 {key}，重启就丢")
+
+    def test_every_key_that_is_read_is_also_written(self):
+        """扫一遍：cfg.get 读的键，_save_config 里都得写。
+
+        autohide / focus / companion 就是这么漏掉的。
+        """
+        src_path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "dsh_pet.py")
+        with open(src_path, encoding="utf-8") as fh:
+            src = fh.read()
+        read = set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"', src))
+        body = re.search(r"def _save_config\(self\).*?(?=\n    def )", src, re.S)
+        self.assertIsNotNone(body, "找不到 _save_config")
+        written = set(re.findall(r'cfg\["([a-z_]+)"\]', body.group(0)))
+        # always_on_top 是「启动时读一次就够」的窗口样式，不是用户开关
+        missing = sorted(read - written - {"always_on_top"})
+        self.assertEqual(missing, [],
+                         f"这些配置项读了但从不写回，重启就丢：{missing}")
 
 
 class TestAccessoryEndToEnd(E2EBase):

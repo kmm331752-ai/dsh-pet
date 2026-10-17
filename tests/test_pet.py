@@ -1308,6 +1308,66 @@ class TestShortName(unittest.TestCase):
         self.assertTrue(f("(clawd)"))
 
 
+class TestDataDir(unittest.TestCase):
+    """数据目录要落在**能写**的地方。
+
+    **装完才发现的问题**：安装包默认装到 `C:\\Program Files\\DSH 桌宠`，
+    而普通权限写不进去。原来的 data_dir() 直接用 exe 所在目录，后果是
+    配置、相处记录、周报、出错日志**全部静默失败**（每处都是 except: pass）——
+    用户看到的是「设置改了重启就丢」，而且连出错日志都没有，无从查起。
+
+    实测：装完之后程序旁边一个 pet_*.json 都没有。
+    """
+
+    def setUp(self):
+        self._orig_cache = B._DATA_DIR_CACHE
+        self._orig_exe = getattr(sys, "executable", None)
+        self._had_frozen = hasattr(sys, "frozen")
+        self._orig_frozen = getattr(sys, "frozen", None)
+
+    def tearDown(self):
+        B._DATA_DIR_CACHE = self._orig_cache
+        if self._orig_exe is not None:
+            sys.executable = self._orig_exe
+        if self._had_frozen:
+            sys.frozen = self._orig_frozen
+        elif hasattr(sys, "frozen"):
+            del sys.frozen
+
+    def test_source_mode_uses_the_script_dir(self):
+        B._DATA_DIR_CACHE = None
+        self.assertEqual(B.data_dir(), os.path.dirname(os.path.abspath(B.__file__)))
+
+    def test_frozen_in_a_writable_dir_stays_put(self):
+        """绿色版：解压在能写的地方，配置就跟着 exe 走，拷走不丢。"""
+        tmp = tempfile.mkdtemp(prefix="dsh-pet-portable-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        B._DATA_DIR_CACHE = None
+        sys.frozen = True
+        sys.executable = os.path.join(tmp, "DSH-Pet.exe")
+        self.assertEqual(B.data_dir(), tmp)
+
+    def test_frozen_in_program_files_falls_back_to_appdata(self):
+        """装在 Program Files：那儿写不了，得换到 %APPDATA%。"""
+        B._DATA_DIR_CACHE = None
+        sys.frozen = True
+        sys.executable = r"C:\Program Files\DSH 桌宠\DSH-Pet.exe"
+        d = B.data_dir()
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+        self.assertTrue(d.startswith(appdata), f"没退到 APPDATA：{d}")
+        self.assertTrue(os.path.isdir(d), "退过去的目录没建出来")
+        self.assertTrue(B._writable(d), "退过去的地方还是写不了")
+
+    def test_writable_probe_is_honest(self):
+        """_writable 是真写一个文件试，不是猜权限位。"""
+        tmp = tempfile.mkdtemp(prefix="dsh-pet-w-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.assertTrue(B._writable(tmp))
+        self.assertFalse(B._writable(os.path.join(tmp, "不存在的目录")))
+        self.assertEqual([f for f in os.listdir(tmp) if "write-test" in f], [],
+                         "探针文件没清掉")
+
+
 class TestConfig(unittest.TestCase):
     def test_paths_are_absolute(self):
         for p in (B.config_path(), B.mood_path(), B.error_log_path(),

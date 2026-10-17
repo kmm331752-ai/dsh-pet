@@ -383,6 +383,61 @@ export function apply(ctx, config) {
     },
   }))
 
+  // 只读探测：宿主到底暴露了哪些服务？
+  //
+  // 起因是想让桌宠从「显示器」变成「遥控器」—— 现在它只能看 DSH 的状态，
+  // 唯一能做的动作是复制会话 ID / 打开日志目录 / 把窗口切前台。
+  //
+  // 而这个插件的 inject 只有 ['subprocess', 'webServer']，碰不到会话管理。
+  // 所以第一步得先知道宿主**有没有**会话相关的服务可注入 —— 有，双向才谈得上。
+  //
+  // 拿不到服务清单（Cordis 没有公开的枚举接口），所以换个路子：
+  // 从 loader 的条目树里挖。条目是插件包，包会声明自己 inject 什么 ——
+  // 把整棵树里出现过的服务名收集起来，就知道这个宿主大概有哪些能力。
+  //
+  // 纯只读，不改任何状态。查完可以删掉这条路由。
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/dsh-pet/probe-services',
+    handler: (_req, res) => {
+      const safe = (fn, fallback) => { try { return fn() } catch { return fallback } }
+      const out = { inject: inject, sources: {}, names: [], byPackage: {}, error: null }
+
+      // 1) 自己注入的
+      out.sources.own = [...inject]
+
+      // 2) loader 条目树里，每个包声明的 inject
+      const entries = safe(() => [...ctx.loader.entries()], []) || []
+      out.entryCount = entries.length
+      const names = new Set()
+      for (const e of entries) {
+        const pkg = safe(() => e && e.options && e.options.name, null) || safe(() => e && e.name, null)
+        const inj = safe(() => e && e.options && e.options.inject, null)
+        if (Array.isArray(inj) && inj.length) {
+          const list = inj.filter((x) => typeof x === 'string')
+          for (const n of list) names.add(n)
+          if (pkg) out.byPackage[pkg] = list
+        }
+      }
+
+      // 3) 兜底：直接从 ctx 上能看到哪些键（Cordis 的服务挂在 ctx 上）
+      const ctxKeys = safe(() => {
+        const ks = []
+        for (const k in ctx) {
+          if (typeof k === 'string' && !k.startsWith('_')) ks.push(k)
+        }
+        return ks
+      }, [])
+      out.ctxKeys = ctxKeys.slice(0, 200)
+      for (const k of ctxKeys) names.add(k)
+
+      out.names = [...names].sort()
+      // 4) 挑出和会话/任务相关的，这才是双向的关键
+      out.sessionLike = out.names.filter((n) => /session|task|turn|message|agent|conversation|history/i.test(n))
+      sendJson(res, out)
+    },
+  }))
+
   // 插件被停用或更新时，把桌宠一并关掉 —— 不让它变成孤儿进程
   ctx.effect(() => () => {
     stop()
@@ -395,5 +450,5 @@ export function apply(ctx, config) {
   }
 
   console.log('[dsh-pet] 路由已注册: /dsh-pet/status, /dsh-pet/toggle, '
-    + '/dsh-pet/debug-boot, /dsh-pet/client-log')
+    + '/dsh-pet/debug-boot, /dsh-pet/client-log, /dsh-pet/probe-services')
 }
