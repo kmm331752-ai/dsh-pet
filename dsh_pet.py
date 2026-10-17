@@ -28,6 +28,8 @@ import tkinter as tk
 from PIL import Image, ImageDraw
 from PIL import ImageTk                              # 皮肤预览要用
 
+import pet_platform
+
 from pet_base import *
 from pet_render import *
 # 下划线开头的名字 import * 带不出来，要显式引（这个坑踩过好几次了）
@@ -333,6 +335,7 @@ class PetApp:
         self.menu.add_command(label=t("和大肥鱼说话…"), command=self._open_chat)
         self.menu.add_command(label=t("导出相处记录…"), command=self._export_record)
         self.menu.add_command(label=t("导出周报…"), command=self._export_week)
+        self.menu.add_command(label=t("刚才错在哪…"), command=self._show_last_error)
         self.menu.add_command(label=t("检查更新…"), command=self._check_update_async)
         self.menu.add_command(label=t("退出"), command=self._quit)
 
@@ -1110,12 +1113,12 @@ class PetApp:
             path = find_log_path(task.session_id) if task.session_id else None
             if path and os.path.exists(path):
                 # /select 会打开目录并选中文件
-                os.startfile(os.path.dirname(path))      # noqa: S606
+                pet_platform.open_in_file_manager(os.path.dirname(path))
                 return
             # 找不到具体文件就打开会话根目录
             root_dir = SESS_DIR
             if os.path.isdir(root_dir):
-                os.startfile(root_dir)                   # noqa: S606
+                pet_platform.open_in_file_manager(root_dir)
                 return
             log_error("打开会话目录失败", FileNotFoundError(root_dir))
         except Exception as exc:                         # noqa: BLE001
@@ -1126,31 +1129,19 @@ class PetApp:
 
         桌宠是 topmost 的无边框窗口，DSH 被压在下面时用户找不到 ——
         这个按钮把 DSH 提到前面。找不到窗口就说一声。
+
+        实现在 pet_platform 里（只有 Windows 做得到 —— 其他平台要
+        Accessibility 权限）。那边返回 False 就说明这个平台没这能力。
         """
         try:
-            user32 = ctypes.windll.user32
-            found = []
-
-            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-            def cb(hwnd, _lp):
-                n = ctypes.create_unicode_buffer(256)
-                user32.GetWindowTextW(hwnd, n, 256)
-                title = n.value or ""
-                if "DeepSeek" in title or "Harness" in title:
-                    if user32.IsWindowVisible(hwnd):
-                        found.append((hwnd, title))
-                return True
-
-            user32.EnumWindows(cb, 0)
-            if not found:
-                if status_label is not None:
-                    status_label.configure(text=t("没找到 DSH 窗口"), fg="#C97A22")
-                return
-            hwnd, _title = found[0]
-            user32.ShowWindow(hwnd, 9)                   # SW_RESTORE
-            user32.SetForegroundWindow(hwnd)
+            ok = pet_platform.foreground_other_window(("DeepSeek", "Harness"))
             if status_label is not None:
-                status_label.configure(text=t("DSH 已切到前台"), fg="#2E9E63")
+                if ok:
+                    status_label.configure(text=t("DSH 已切到前台"), fg="#2E9E63")
+                elif not pet_platform.IS_WINDOWS:
+                    status_label.configure(text=t("这个平台上做不了"), fg="#C97A22")
+                else:
+                    status_label.configure(text=t("没找到 DSH 窗口"), fg="#C97A22")
         except Exception as exc:                         # noqa: BLE001
             log_error("切换 DSH 窗口失败", exc)
             if status_label is not None:
@@ -1236,6 +1227,73 @@ class PetApp:
         except Exception as exc:                         # noqa: BLE001
             log_error("导出周报失败", exc)
 
+    # -- 失败诊断 -----------------------------------------------------------
+    def _show_last_error(self) -> None:
+        """「刚才错在哪」：把最近一次工具出错摊开给你看。
+
+        起因：任务失败时信息卡只写「出错重试」—— 等于没说。
+        日志里其实有完整的错误正文（哪个工具、第几回合第几步、报什么），
+        挖出来放这儿，一键复制。
+        """
+        tk = self.tk
+        info = None
+        if self.watcher is not None and self.snap is not None and self.snap.session_id:
+            try:
+                tail = self.watcher._tail(self.snap.session_id)
+                tail.poll()
+                info = tail.last_error()
+            except Exception as exc:                     # noqa: BLE001
+                log_error("读取出错详情失败", exc)
+
+        if getattr(self, "_err_win", None) is not None:
+            try:
+                self._err_win.destroy()
+            except Exception:                            # noqa: BLE001
+                pass
+        win = tk.Toplevel(self.root)
+        self._err_win = win
+        win.title(t("刚才错在哪"))
+        win.attributes("-topmost", True)
+        win.geometry("560x340")
+
+        if not info:
+            tk.Label(win, text=t("最近没有工具出错"), anchor="w").pack(
+                fill="x", padx=14, pady=14)
+            tk.Button(win, text=t("关闭"),
+                      command=lambda: (win.destroy(),
+                                       setattr(self, "_err_win", None))).pack(pady=8)
+            return
+
+        head = tk.Frame(win)
+        head.pack(fill="x", padx=14, pady=(12, 6))
+        where = ""
+        if info.get("turn") is not None and info.get("step") is not None:
+            where = f"  {t('第')} {info['turn']}-{info['step']} {t('步')}"
+        tk.Label(head, text=f"{t('工具')}: {info['tool']}{where}",
+                 anchor="w", font=("Microsoft YaHei UI", 10, "bold")).pack(fill="x")
+        tk.Label(head, text=info["head"] or t("没有细节"), anchor="w",
+                 fg="#B93B37", wraplength=520, justify="left").pack(fill="x", pady=(4, 0))
+
+        box = tk.Text(win, wrap="word", height=10,
+                      font=("Consolas", 9), bg="#1E212A", fg="#E6E9F0",
+                      insertbackground="#E6E9F0", relief="flat")
+        box.pack(fill="both", expand=True, padx=14, pady=(6, 4))
+        box.insert("1.0", info["text"])
+        box.configure(state="disabled")
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Button(bar, text=t("复制全文"),
+                  command=lambda: self._copy_text(info["text"], t("已复制"))
+                  ).pack(side="left")
+        tk.Button(bar, text=t("打开日志"),
+                  command=lambda: self._open_session_log(
+                      type("T", (), {"session_id": self.snap.session_id})())
+                  ).pack(side="left", padx=6)
+        tk.Button(bar, text=t("关闭"),
+                  command=lambda: (win.destroy(),
+                                   setattr(self, "_err_win", None))).pack(side="right")
+
     # -- 本地对话 -----------------------------------------------------------
     def _set_chat_status(self, text: str, color: str = "#666") -> None:
         """把「测试连接」的结果写到设置窗口那行状态上。窗口关了就算了。"""
@@ -1249,6 +1307,42 @@ class PetApp:
                     return
         except Exception:                                # noqa: BLE001
             pass
+
+    def _observed_notes(self) -> list:
+        """从她本来就看得到的数据里，推出几条关于你的事实。
+
+        **这是「她记得你」里可靠的那一半** —— 不用猜，数据就在这儿：
+        你最常用什么工具、几点在干活、认识多少天、这周跑了多少活。
+
+        另一半（你说「我叫小明」那种自我披露）走的是模式匹配，是尽力而为，
+        抠错了能在对话窗口里删。两者都进 memory_brief()。
+        """
+        notes = []
+        try:
+            m = self.companion.mood if self.companion else None
+            if m is not None:
+                if m.days_together >= 2:
+                    notes.append(f"你们认识 {m.days_together} 天了")
+                st = m.week_stats()
+                if st["done"]:
+                    notes.append(f"这周跑了 {st['done']} 个任务")
+                if st["slowest"]:
+                    notes.append(f"最近最慢的工具是 {st['slowest'][0][0]}")
+                # 作息：挑出他真正在干活的小时
+                slots = getattr(m, "busy_slots", None)
+                seen = getattr(m, "seen_slots", None)
+                if slots and seen and sum(seen) >= 30:
+                    hot = [h for h in range(24)
+                           if seen[h] and slots[h] / max(1, seen[h]) >= 0.5]
+                    if hot:
+                        notes.append("他常在 " + "、".join(f"{h} 点" for h in hot[:4])
+                                     + " 干活")
+            s = self.snap
+            if s is not None and s.title and s.state not in ("idle", "offline"):
+                notes.append(f"现在在忙「{s.title[:24]}」")
+        except Exception as exc:                         # noqa: BLE001
+            log_error("整理观察记忆失败", exc)
+        return notes
 
     def _chat_context(self) -> str:
         """给她一点「你现在在干什么」的背景，好接得上话。"""
@@ -1321,6 +1415,8 @@ class PetApp:
 
             def work():
                 try:
+                    # 每次问之前刷新观察记忆 —— 她得知道自己看到了什么
+                    self.chat.notes = self._observed_notes()
                     reply = self.chat.ask(text, self._chat_context())
                     self._tray_actions.append(f"chat-reply:{reply}")
                 except Exception as exc:                 # noqa: BLE001
@@ -1436,12 +1532,14 @@ class PetApp:
             return
         self._last_sound[event] = now
         try:
-            import winsound
-            # 用户音效包优先
+            # 用户音效包优先（各平台都能放）
             wav = os.path.join(data_dir(), "sounds", f"{event}.wav")
             if os.path.exists(wav):
-                winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                pet_platform.play_sound_file(wav)
                 return
+            if not pet_platform.IS_WINDOWS:
+                return                                   # 系统事件音只有 Windows 有
+            import winsound
             alias = SOUND_ALIASES.get(event, SOUND_ALIASES["done"])
             winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
         except Exception:                                 # noqa: BLE001

@@ -54,3 +54,6 @@ pet_error.log
 
 # 排查时随手截的实机图，不是交付物
 preview/_*.png
+
+# 对话记录 + 她记得的事
+pet_chat_memory.json
