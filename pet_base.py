@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from ctypes import wintypes
 from typing import Optional
 
+import pet_platform
+
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +152,11 @@ def week_path() -> str:
     return os.path.join(data_dir(), "周报.png")
 
 
+def chat_history_path() -> str:
+    """对话记录 + 她记得的事。"""
+    return os.path.join(data_dir(), "pet_chat_memory.json")
+
+
 def sounds_dir() -> str:
     """自定义音效包目录。放 <事件>.wav 就会盖掉系统音。"""
     return os.path.join(data_dir(), "sounds")
@@ -177,6 +184,12 @@ DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
 
 
 def set_dpi_awareness() -> bool:
+    # 平台差异收在 pet_platform 里（非 Windows 直接 return）
+    pet_platform.set_dpi_awareness()
+    return True
+
+
+def _set_dpi_awareness_win32() -> bool:
     """声明本进程自己做 DPI 缩放。返回是否成功。
 
     PerMonitorV2 是 Win10 1703+ 才有的；老系统退回 System DPI 感知，
@@ -206,6 +219,10 @@ def set_dpi_awareness() -> bool:
 
 
 def dpi_scale() -> float:
+    return pet_platform.dpi_scale()
+
+
+def _dpi_scale_win32() -> float:
     """主显示器的缩放倍数（96 DPI = 1.0）。取不到就当 1.0。"""
     try:
         # GetDpiForSystem 是 Win10 1607+；老系统用桌面 DC 的 LOGPIXELSX
@@ -469,25 +486,16 @@ class LayeredDisplay:
             raise OSError("UpdateLayeredWindow failed")
 
 
-def move_window(hwnd: int, x: int, y: int) -> bool:
+def move_window(hwnd: int, x: int, y: int, root=None) -> bool:
     """把窗口搬到 (x, y)，**允许搬到屏幕外**。
 
-    Tk 的 `geometry()` 会把窗口夹在可见区域内 —— 实测：想放到 -236，
-    实际停在 0。贴边隐藏需要把窗口大部分挪到屏幕外，Tk 做不到，
-    只能走 Win32 的 SetWindowPos。
+    Windows 走 SetWindowPos —— 只有它能搬到屏幕外（贴边隐藏要用；
+    Tk 的 geometry() 会把窗口夹回可见区域，实测想放 -236 实际停在 0）。
+    其他平台退回 Tk 的 geometry()，贴边隐藏在那儿退化成"贴边但不藏"。
 
-    返回是否成功。失败不抛异常：挪不动只是隐藏效果差点，不该让轮询挂掉。
+    实现在 pet_platform.move_window。
     """
-    try:
-        SWP_NOSIZE = 0x0001
-        SWP_NOZORDER = 0x0004
-        SWP_NOACTIVATE = 0x0010
-        return bool(ctypes.windll.user32.SetWindowPos(
-            hwnd, 0, int(x), int(y), 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE))
-    except Exception as exc:                             # noqa: BLE001
-        log_error("移动窗口失败", exc)
-        return False
+    return pet_platform.move_window(hwnd, root, x, y)
 
 
 class ColorKeyDisplay:
@@ -517,12 +525,57 @@ class ColorKeyDisplay:
         self.label.configure(image=self._photo)
 
 
+class AlphaDisplay:
+    """macOS / Linux 的回退：整窗统一透明度，不做逐像素抠图。
+
+    **没在真机上验证过** —— 开发机是 Windows。写它的目的是"别崩"：
+    前两个后端都依赖 Win32（`ctypes.windll` 在 macOS 上根本不存在），
+    没有这一层的话 `make_display` 抛异常、程序起不来。
+
+    代价是背景不是真透明，而是一整块半透明（Tk 的 `-alpha` 是整窗一个值）。
+    macOS 和带合成器的 X11 支持；不支持的话 `wm_attributes` 会失败，
+    那就退化成不透明 —— 丑，但能用。
+    """
+
+    def __init__(self, root, w: int, h: int):
+        import tkinter as tk
+        from PIL import ImageTk
+        self._tk, self._ImageTk = tk, ImageTk
+        self.w, self.h = w, h
+        root.configure(bg="#1A1D26")
+        for opt, val in (("-alpha", 0.92), ("-topmost", True)):
+            try:
+                root.wm_attributes(opt, val)
+            except Exception:                            # noqa: BLE001
+                pass
+        self.label = tk.Label(root, bd=0, bg="#1A1D26", highlightthickness=0)
+        self.label.pack()
+        self._photo = None
+
+    def push(self, img: Image.Image) -> None:
+        # 半透明背景上直接把 RGBA 合成到深色底，看起来才不像贴纸
+        base = Image.new("RGB", img.size, (26, 29, 38))
+        base.paste(img, (0, 0), img)
+        self._photo = self._ImageTk.PhotoImage(base)
+        self.label.configure(image=self._photo)
+
+
 def make_display(root, w: int, h: int):
-    try:
-        return LayeredDisplay(root, w, h), "layered"
-    except Exception as exc:                             # noqa: BLE001
-        log_error("分层窗口不可用，回退到透明色方案", exc)
-        return ColorKeyDisplay(root, w, h), "colorkey"
+    """按平台挑后端。挑不到也别让程序起不来 —— 一路降级到能用为止。
+
+    Windows：分层窗口（逐像素 alpha，最好看）
+    其他：  Tk 整窗半透明（能用，背景不真透明）
+    """
+    if pet_platform.IS_WINDOWS:
+        try:
+            return LayeredDisplay(root, w, h), "layered"
+        except Exception as exc:                         # noqa: BLE001
+            log_error("分层窗口不可用，回退到透明色方案", exc)
+        try:
+            return ColorKeyDisplay(root, w, h), "colorkey"
+        except Exception as exc:                         # noqa: BLE001
+            log_error("透明色方案也不可用，回退到半透明窗口", exc)
+    return AlphaDisplay(root, w, h), "alpha"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -570,6 +623,10 @@ def _gear(d: ImageDraw.ImageDraw, cx, cy, r, teeth, angle, fill, outline, w):
 
 
 def virtual_screen() -> tuple:
+    return pet_platform.virtual_screen()
+
+
+def _virtual_screen_win32() -> tuple:
     """所有显示器合起来的虚拟桌面范围 (x, y, w, h)。
 
     多显示器下主屏左上角不一定是 (0,0) —— 副屏在主屏左边时 x 会是负数，
@@ -597,10 +654,13 @@ def clamp_position(x: int, y: int) -> tuple:
 
 
 def default_position() -> tuple:
-    """默认位置：主屏右下角往上一点。"""
-    u = ctypes.windll.user32
-    sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)        # SM_CX/YSCREEN
-    return sw - WIN_W - 40, sh - WIN_H - 90
+    """默认位置：主屏右下角往上一点。
+
+    走 virtual_screen() 而不是直接问 Win32 —— 非 Windows 上
+    `ctypes.windll` 不存在，这一句就能让程序起不来。
+    """
+    vx, vy, vw, vh = virtual_screen()
+    return vx + vw - WIN_W - 40, vy + vh - WIN_H - 90
 
 
 # ─────────────────────────────────────────────────────────────────────────────

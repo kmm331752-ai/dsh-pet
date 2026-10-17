@@ -1,6 +1,8 @@
-﻿"""系统集成：全局热键、更新检查、开机自启。"""
+"""系统集成：全局热键、更新检查、开机自启。"""
 
 from __future__ import annotations
+
+import pet_platform
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -51,6 +53,10 @@ class HotKeys(threading.Thread):
         self.registered: list = []
 
     def run(self) -> None:
+        # 全局热键只有 Windows 做得到（RegisterHotKey）。其他平台直接返回，
+        # 线程空转一下就好 —— 别让 ctypes.windll 在 macOS 上抛 AttributeError。
+        if not pet_platform.IS_WINDOWS:
+            return
         u = ctypes.windll.user32
         for hid, (mods, vk, _) in HOTKEYS.items():
             if u.RegisterHotKey(None, hid, mods, vk):
@@ -69,6 +75,8 @@ class HotKeys(threading.Thread):
 
     def stop(self) -> None:
         """注销并让消息循环退出（PostThreadMessage 打断 GetMessage）。"""
+        if not pet_platform.IS_WINDOWS:
+            return
         u = ctypes.windll.user32
         for hid in self.registered:
             u.UnregisterHotKey(None, hid)
@@ -86,7 +94,7 @@ class HotKeys(threading.Thread):
 # 网络不通、限流、被墙都只算「查不到」，绝不能让桌宠因此启动不了或弹错误。
 
 REPO = "kmm331752-ai/dsh-pet"
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.7.0"
 UPDATE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 
@@ -135,6 +143,12 @@ def autostart_command() -> str:
 
 
 def autostart_enabled() -> bool:
+    """开机自启。只有 Windows 实现了（注册表 Run 键）。
+
+    其他平台返回 False —— 别让"读一下状态"就崩。
+    """
+    if not pet_platform.IS_WINDOWS:
+        return False
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
@@ -145,6 +159,9 @@ def autostart_enabled() -> bool:
 
 
 def set_autostart(on: bool) -> bool:
+    """开/关自启。非 Windows 直接返回 False。"""
+    if not pet_platform.IS_WINDOWS:
+        return False
     """开/关开机自启。返回是否成功。"""
     try:
         import winreg

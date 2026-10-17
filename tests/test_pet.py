@@ -31,6 +31,7 @@ import pet_accessories as A  # noqa: E402
 import pet_base as B  # noqa: E402
 import pet_chat as C  # noqa: E402
 import pet_i18n as I  # noqa: E402
+import pet_platform as PF  # noqa: E402
 import pet_sources as S  # noqa: E402
 
 
@@ -777,6 +778,18 @@ class TestAccessories(unittest.TestCase):
 class TestChat(unittest.TestCase):
     """本地对话。用桩服务器验证协议 —— 本机没模型也能测。"""
 
+    def setUp(self):
+        # 对话记忆会落到 data_dir 里。不隔离的话这个测试会去读**真实的
+        # pet_chat_memory.json** —— 于是「第二轮该带上第一轮」这种断言
+        # 会看到盘上的旧记录，莫名其妙地挂（踩过）。
+        self._tmp = tempfile.mkdtemp(prefix="dsh-pet-chat-")
+        self._orig_data_dir = B.data_dir
+        B.data_dir = lambda: self._tmp
+
+    def tearDown(self):
+        B.data_dir = self._orig_data_dir
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
     @classmethod
     def setUpClass(cls):
         import http.server
@@ -1366,6 +1379,384 @@ class TestDataDir(unittest.TestCase):
         self.assertFalse(B._writable(os.path.join(tmp, "不存在的目录")))
         self.assertEqual([f for f in os.listdir(tmp) if "write-test" in f], [],
                          "探针文件没清掉")
+
+
+class TestErrorDiagnosis(unittest.TestCase):
+    """失败时自动诊断：把「哪个工具、错在哪」挖出来。
+
+    **踩过的形状**：错误标记在 `message.isError` 上，**不是** content 项上；
+    正文在 `content[0].text`，另外 `data.error` 里有结构化信息。
+    第一版查 content 项的 isError，2257 条 tool/result 一条都没匹配上。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-err-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _log(self, events, name="s.v4.jsonl.zstd"):
+        """写一个 zstd 会话日志。
+
+        **必须 zstd** —— LogTail._seed 是按 zstd magic 找帧的，
+        纯 jsonl 它会直接 return（第一版就这么误判成"没解析出来"）。
+        """
+        import zstandard as zstd
+        p = os.path.join(self.tmp, name)
+        raw = ("\n".join(json.dumps(e, ensure_ascii=False) for e in events)
+               + "\n").encode("utf-8")
+        with open(p, "wb") as fh:
+            fh.write(zstd.ZstdCompressor().compress(raw))
+        return p
+
+    @staticmethod
+    def _err_event(tool="pwsh", cid="c1", turn=3, step=7, text="Error: 命令不存在\n第二行"):
+        return [
+            {"type": "tool/call", "seq": 1, "time": 1000,
+             "data": {"callId": cid, "name": tool}},
+            {"type": "tool/result", "seq": 2, "time": 1500, "sourceEventSeqs": [1],
+             "data": {"turn": turn, "step": step,
+                      "message": {"toolCallId": cid, "isError": True,
+                                  "content": [{"type": "text", "text": text}]}}},
+        ]
+
+    def test_captures_a_tool_error(self):
+        p = self._log(self._err_event())
+        lt = S.LogTail(p)
+        lt.poll()
+        self.assertEqual(len(lt.errors), 1, "没抓到错误")
+        e = lt.last_error()
+        self.assertEqual(e["tool"], "pwsh")
+        self.assertEqual((e["turn"], e["step"]), (3, 7))
+        self.assertTrue(e["head"].startswith("Error: 命令不存在"), e["head"])
+
+    def test_brief_is_readable(self):
+        lt = S.LogTail(self._log(self._err_event()))
+        lt.poll()
+        brief = lt.error_brief()
+        for piece in ("pwsh", "3-7", "命令不存在"):
+            self.assertIn(piece, brief, brief)
+
+    def test_no_error_gives_empty_brief(self):
+        p = self._log([{"type": "tool/call", "seq": 1, "time": 1000,
+                        "data": {"callId": "c1", "name": "read"}}])
+        lt = S.LogTail(p)
+        lt.poll()
+        self.assertEqual(lt.errors, [])
+        self.assertEqual(lt.error_brief(), "")
+
+    def test_seed_does_not_double_consume(self):
+        """_seed 之后第一次 poll() 不能把同样的内容再读一遍。
+
+        **踩过**：原来的 offset 在小文件上退化成 0，于是 __init__ 里记一遍、
+        poll() 里又记一遍 —— 工具耗时和错误各算两次。
+        长会话看不出来（帧多，offset 算对了），**新开的会话必然中招**。
+        实测：194 字节的单帧文件，__init__ 后 errors=1，poll() 后 errors=2。
+        """
+        p = self._log(self._err_event())
+        lt = S.LogTail(p)
+        self.assertEqual(len(lt.errors), 1, "__init__ 阶段")
+        lt.poll()
+        self.assertEqual(len(lt.errors), 1, "第一次 poll 重复消费了")
+        lt.poll()
+        self.assertEqual(len(lt.errors), 1, "第二次 poll 又重复了")
+        self.assertEqual(len(lt.tool_times.get("pwsh", [])), 1, "工具耗时也重复了")
+
+    def test_offset_lands_at_end_of_consumed_data(self):
+        p = self._log(self._err_event())
+        lt = S.LogTail(p)
+        self.assertEqual(lt.offset, os.path.getsize(p),
+                         "offset 没落在真正消费完的位置")
+
+    def test_error_reaches_the_card_line(self):
+        """错误摘要要能出现在信息卡副行上 —— 只写「出错重试」等于没说。"""
+        p = self._log(self._err_event())
+        lt = S.LogTail(p)
+        lt.poll()
+        task = P.TaskInfo(session_id="x", state="failed", title="t",
+                          error=lt.error_brief())
+        self.assertIn("pwsh", task.error)
+
+
+class TestChatMemory(unittest.TestCase):
+    """对话记忆 + 她记得你。
+
+    分两种，可靠程度不同：
+      · **观察型** —— 从她本来就看得到的数据里推（常跑什么、几点在、认识多久）
+      · **对话型** —— 你说「我叫小明」这种自我披露，模式匹配抠出来
+    后者**是尽力而为**：中文没有格标记，模式必然漏也会错，所以只认几个明确句式。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-mem-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ── 事实抽取 ──
+    def test_extracts_self_disclosure(self):
+        cases = [
+            ("我叫小明", [("名字", "小明")]),
+            ("我是做电商的", [("身份", "做电商的")]),
+            ("我在做商品复制软件", [("在做", "商品复制软件")]),
+            ("我喜欢喝咖啡", [("喜欢", "喝咖啡")]),
+        ]
+        for text, want in cases:
+            with self.subTest(text=text):
+                self.assertEqual(C.extract_facts(text), want)
+
+    def test_does_not_double_match(self):
+        """「我在做 X」不该被「我在 X」再匹配一遍。
+
+        踩过：两个模式都命中，同一个句子抽出两条。
+        """
+        got = C.extract_facts("我在做商品复制软件")
+        self.assertEqual(len(got), 1, f"重复匹配了：{got}")
+
+    def test_ignores_chit_chat(self):
+        for text in ("今天天气不错", "", "我是谁", "吃了吗"):
+            with self.subTest(text=text):
+                self.assertEqual(C.extract_facts(text), [], text)
+
+    # ── 存取 ──
+    def test_remember_and_dedupe(self):
+        c = C.ChatClient("127.0.0.1:11434", "m")
+        c.load()
+        self.assertTrue(c.remember("名字", "小明"))
+        self.assertFalse(c.remember("名字", "小明"), "重复的也记了")
+        self.assertTrue(c.remember("喜欢", "喝咖啡"))
+        self.assertEqual(len(c.facts), 2)
+
+    def test_survives_a_restart(self):
+        c = C.ChatClient("127.0.0.1:11434", "m")
+        c.load()
+        c.remember("名字", "小明")
+        c.history = [{"role": "user", "content": "你好"},
+                     {"role": "assistant", "content": "你好呀"}]
+        c.save()
+
+        c2 = C.ChatClient("127.0.0.1:11434", "m")
+        c2.load()
+        self.assertEqual(len(c2.facts), 1)
+        self.assertEqual(c2.facts[0]["value"], "小明")
+        self.assertEqual(len(c2.history), 2, "对话没存下来")
+
+    def test_bad_file_does_not_crash(self):
+        with open(B.chat_history_path(), "w", encoding="utf-8") as fh:
+            fh.write("{不是 json")
+        c = C.ChatClient("", "")
+        c.load()
+        self.assertEqual(c.facts, [])
+        self.assertEqual(c.history, [])
+
+    def test_bom_file_is_readable(self):
+        import io as _io
+        with _io.open(B.chat_history_path(), "w", encoding="utf-8-sig") as fh:
+            json.dump({"facts": [{"kind": "名字", "value": "小红"}], "history": []},
+                      fh, ensure_ascii=False)
+        c = C.ChatClient("", "")
+        c.load()
+        self.assertEqual(len(c.facts), 1)
+
+    def test_facts_are_capped(self):
+        c = C.ChatClient("", "")
+        for i in range(60):
+            c.remember("x", f"v{i}")
+        self.assertLessEqual(len(c.facts), C.MAX_FACTS)
+
+    def test_forget(self):
+        c = C.ChatClient("", "")
+        c.remember("名字", "小明")
+        c.remember("喜欢", "咖啡")
+        c.forget(0)
+        self.assertEqual(len(c.facts), 1)
+        self.assertEqual(c.facts[0]["kind"], "喜欢")
+
+    def test_memory_brief_includes_both_kinds(self):
+        c = C.ChatClient("", "")
+        c.remember("名字", "小明")
+        c.notes = ["你常在 14 点干活"]
+        brief = c.memory_brief()
+        self.assertIn("小明", brief)
+        self.assertIn("14 点", brief)
+
+
+class TestObservedMemory(unittest.TestCase):
+    """观察型记忆：从真实数据推出来的那半。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-obs-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+        with open(B.config_path(), "w", encoding="utf-8") as fh:
+            json.dump({"skin": "dafeiyu", "companion": True}, fh)
+        self._saved = sys.modules.pop("pystray", None)
+        sys.modules["pystray"] = None
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        sys.modules.pop("pystray", None)
+        if self._saved is not None:
+            sys.modules["pystray"] = self._saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _app(self):
+        import argparse
+        args = argparse.Namespace(
+            demo=False, force_state="idle", session=None, shot=None, skin="dafeiyu",
+            list_skins=False, privacy=False, no_companion=True, no_hotkeys=True)
+        app = P.PetApp(args)
+        self.addCleanup(lambda: self._safe_quit(app))
+        app.root.update()
+        return app
+
+    @staticmethod
+    def _safe_quit(app):
+        try:
+            app._quit()
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def test_empty_without_companion(self):
+        app = self._app()
+        app.companion = None
+        self.assertEqual(app._observed_notes(), [])
+
+    def test_derives_from_real_data(self):
+        app = self._app()
+        app.companion = S.CompanionSource()
+        m = app.companion.mood
+        m.first_seen = time.time() - 12 * 86400
+        for _ in range(7):
+            m.note_completion(True)
+        m.note_tool("job_output", 62000)
+        for h in range(24):
+            m.seen_slots[h] = 20
+            m.busy_slots[h] = 18 if 14 <= h <= 18 else 2
+
+        notes = " ".join(app._observed_notes())
+        self.assertIn("天", notes, notes)
+        self.assertIn("7 个任务", notes, notes)
+        self.assertIn("job_output", notes, notes)
+        self.assertIn("14 点", notes, notes)
+
+    def test_no_notes_from_thin_data(self):
+        """数据太少时别硬编 —— 认识一天、没跑过任务，就什么都别说。"""
+        app = self._app()
+        app.companion = S.CompanionSource()
+        self.assertEqual(app._observed_notes(), [])
+
+    def test_broken_mood_does_not_crash(self):
+        app = self._app()
+        app.companion = S.CompanionSource()
+        app.companion.mood.week_stats = lambda: (_ for _ in ()).throw(RuntimeError("坏了"))
+        self.assertEqual(app._observed_notes(), [], "坏了应该返回空而不是抛")
+
+
+class TestPlatformLayer(unittest.TestCase):
+    """平台层。
+
+    **诚实的边界**：非 Windows 分支**没有在真机上验证过** —— 开发机是 Windows。
+    所以这里测的是：
+      · Windows 上快路径没坏（有真值可比）
+      · 每个函数**在任何平台都不会抛**（这是 mac/Linux 上"起不来"的直接原因）
+      · 模拟非 Windows 时，回退逻辑走的是对的那条
+
+    最后一条用 patch SYSTEM / IS_WINDOWS 来模拟 —— 它能验证分支选择，
+    **不能**验证那条分支在真 macOS 上跑得通。
+    """
+
+    def test_windows_fast_path_is_intact(self):
+        if not PF.IS_WINDOWS:
+            self.skipTest("只在 Windows 上比真值")
+        self.assertGreaterEqual(PF.dpi_scale(), 1.0)
+        vx, vy, vw, vh = PF.virtual_screen()
+        self.assertGreater(vw, 0)
+        self.assertGreater(vh, 0)
+        self.assertIn(PF.system_language(), ("zh", "en", ""))
+
+    def test_nothing_raises_on_any_platform(self):
+        """每个函数都不能抛 —— 抛了就是程序起不来。
+
+        非 Windows 上 `ctypes.windll` 根本不存在，这是最容易崩的地方。
+        """
+        calls = [
+            ("dpi_scale", lambda: PF.dpi_scale()),
+            ("system_language", lambda: PF.system_language()),
+            ("idle_seconds", lambda: PF.idle_seconds()),
+            ("cursor_pos", lambda: PF.cursor_pos()),
+            ("virtual_screen", lambda: PF.virtual_screen()),
+            ("platform_note", lambda: PF.platform_note()),
+            ("open_in_file_manager", lambda: PF.open_in_file_manager("")),
+            ("play_sound_file", lambda: PF.play_sound_file("")),
+            ("foreground_other_window", lambda: PF.foreground_other_window(["x"])),
+            ("set_dpi_awareness", lambda: PF.set_dpi_awareness()),
+        ]
+        for name, fn in calls:
+            with self.subTest(fn=name):
+                fn()                                     # 不抛就算过
+
+    def test_simulated_non_windows_takes_fallbacks(self):
+        """把 IS_WINDOWS 关掉，确认走的是回退而不是 Win32。"""
+        with mock.patch.object(PF, "IS_WINDOWS", False), \
+             mock.patch.object(PF, "SYSTEM", "Darwin"):
+            self.assertEqual(PF.dpi_scale(), 1.0)
+            self.assertEqual(PF.idle_seconds(), 0.0)
+            self.assertEqual(PF.cursor_pos(), (0, 0))
+            self.assertFalse(PF.foreground_other_window(["x"]))
+            self.assertTrue(PF.platform_note(), "非 Windows 应该说明哪些功能没有")
+
+    def test_open_and_play_return_false_for_missing_paths(self):
+        self.assertFalse(PF.open_in_file_manager("Z:\\不存在的目录"))
+        self.assertFalse(PF.play_sound_file("Z:\\不存在.wav"))
+        self.assertFalse(PF.open_in_file_manager(""))
+
+    def test_module_functions_delegate(self):
+        """各模块的包装函数要转发到平台层。
+
+        不转发的话，改了平台层但模块还用老实现 —— 静默失效。
+        """
+        with mock.patch.object(PF, "dpi_scale", lambda: 2.5):
+            self.assertEqual(B.dpi_scale(), 2.5)
+        with mock.patch.object(PF, "virtual_screen", lambda: (1, 2, 3, 4)):
+            self.assertEqual(B.virtual_screen(), (1, 2, 3, 4))
+        with mock.patch.object(PF, "cursor_pos", lambda: (7, 8)):
+            self.assertEqual(S.cursor_pos(), (7, 8))
+        with mock.patch.object(PF, "idle_seconds", lambda: 12.5):
+            self.assertEqual(S.idle_seconds(), 12.5)
+        with mock.patch.object(PF, "system_language", lambda: "en"):
+            self.assertEqual(I._system_lang(), "en")
+
+    def test_language_falls_back_when_unknown(self):
+        with mock.patch.object(PF, "system_language", lambda: ""):
+            self.assertEqual(I._system_lang(), "zh", "认不出来要有默认值")
+
+    def test_display_backend_picks_alpha_off_windows(self):
+        """非 Windows 上要挑到 AlphaDisplay，不能抛。
+
+        前两个后端都依赖 Win32，没有第三个的话 make_display 会抛，
+        程序直接起不来。
+        """
+        with mock.patch.object(PF, "IS_WINDOWS", False):
+            self.assertTrue(hasattr(B, "AlphaDisplay"),
+                            "没有 AlphaDisplay 这个回退后端")
+        # 真建一次（在 Windows 上也能建，只是不会走这条路）
+        try:
+            import tkinter
+            root = tkinter.Tk()
+            root.withdraw()
+            disp = B.AlphaDisplay(root, 64, 48)
+            from PIL import Image
+            disp.push(Image.new("RGBA", (64, 48), (255, 0, 0, 128)))
+            root.destroy()
+        except Exception as exc:                         # noqa: BLE001
+            self.fail(f"AlphaDisplay 建不起来：{exc}")
 
 
 class TestConfig(unittest.TestCase):

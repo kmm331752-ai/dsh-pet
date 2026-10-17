@@ -16,6 +16,8 @@ auto 就按 Windows 的界面语言判断。
 
 from __future__ import annotations
 
+import pet_platform
+
 import ctypes
 import os
 
@@ -27,6 +29,10 @@ _current = "zh"
 
 
 def _system_lang() -> str:
+    return pet_platform.system_language() or "zh"
+
+
+def _system_lang_win32() -> str:
     """按 Windows 界面语言猜。猜不出来就当中文（这项目的用户大多是中文）。"""
     try:
         # GetUserDefaultUILanguage 返回 LANGID；中文是 0x0804/0x0404/0x0C04/0x1004
@@ -318,6 +324,20 @@ EN = {
     "输出": "Output",
     "大肥鱼（内置）": "Dafeiyu (built-in)",
 
+    # ── 失败诊断 ──
+    "刚才错在哪…": "What went wrong…",
+    "刚才错在哪": "What went wrong",
+    "最近没有工具出错": "No tool errors recently",
+    "第": "turn",
+    "步": "",
+    "工具": "Tool",
+    "没有细节": "no details",
+    "出错": " failed",
+    "第 ": "turn ",
+    " 步": "",
+    "复制全文": "Copy all",
+    "已复制": "Copied",
+
     # ── 贴边隐藏 ──
     "贴边自动隐藏（鼠标靠近才出来）": "Auto-hide at screen edge (peek on hover)",
 
@@ -346,6 +366,7 @@ EN = {
     "已复制会话 ID": "Session ID copied",
     "已复制摘要": "Summary copied",
     "没找到 DSH 窗口": "Could not find the DSH window",
+    "这个平台上做不了": "Not possible on this platform",
     "DSH 已切到前台": "DSH brought to front",
     "切不过去": "Could not switch",
     "DSH 没有「直接跳到某个会话」的接口，"

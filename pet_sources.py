@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pet_platform
+
 import ctypes
 import ctypes.wintypes as wintypes
 import json
@@ -61,6 +63,7 @@ class LogTail:
         self.call_at: dict = {}
         self.call_name: dict = {}
         self.tool_times: dict = {}
+        self.errors: list = []          # 最近的工具出错，给「失败时自动诊断」用
         self._dctx = None
         if path:
             self._seed()
@@ -80,7 +83,15 @@ class LogTail:
             return None
 
     def _seed(self, tail_bytes: int = 3_000_000, max_frames: int = 40) -> None:
-        """启动时只解最近的若干帧，避免长会话拖慢启动。"""
+        """启动时只解最近的若干帧，避免长会话拖慢启动。
+
+        **offset 要落在真正消费完的位置**，不能简单地设成"第一帧的开头"。
+        原来的写法在小文件上会退化成 0，于是紧接着的第一次 poll() 把同样的
+        内容又读一遍 —— 工具耗时和错误各记两遍。
+
+        实测：一个 194 字节的单帧文件，__init__ 后 errors=1，poll() 后 errors=2。
+        长会话看不出来（帧多，offset 算对了），**新开的会话必然中招**。
+        """
         try:
             size = os.path.getsize(self.path)
             with open(self.path, "rb") as fh:
@@ -96,15 +107,19 @@ class LogTail:
             i = buf.find(self.MAGIC, i + 1)
         if not offs:
             return
-        for n, start in enumerate(offs[-(max_frames + 1):-1] if len(offs) > 1 else offs):
-            end = offs[offs.index(start) + 1] if offs.index(start) + 1 < len(offs) else len(buf)
+
+        # 只看最近 max_frames 帧
+        starts = offs[-max_frames:]
+        consumed_end = base + starts[0]          # 默认：一帧都没吃下，从头来
+        for idx, start in enumerate(starts):
+            end = starts[idx + 1] if idx + 1 < len(starts) else len(buf)
             txt = self._decode_frame(buf[start:end])
-            if txt:
-                self._consume(txt)
-        # 全部已解帧之后的偏移作为续读起点
-        self.offset = base + (offs[-max_frames - 1] if len(offs) > max_frames + 1 else offs[0])
-        if self.offset == base + offs[0]:
-            self.offset = base + (offs[-max_frames] if len(offs) > max_frames else offs[0])
+            if txt is None:
+                # 这一帧不完整（文件还在写）。停在它前面，让 poll() 稍后重试。
+                break
+            self._consume(txt)
+            consumed_end = base + end
+        self.offset = consumed_end
 
     def _consume(self, text: str) -> None:
         text = self.partial + text
@@ -148,12 +163,64 @@ class LogTail:
                         if len(bucket) > 40:                 # 只留最近 40 次
                             del bucket[:20]
                     break
+                # 出错就记一笔，给「失败时自动诊断」用。
+                # 结构是踩出来的：错误标记在 **message** 上（不是 content 项上），
+                # 正文在 content[0].text，另外 data.error 里有结构化信息。
+                msg = data.get("message")
+                if isinstance(msg, dict) and msg.get("isError"):
+                    self._note_error(ev, msg)
 
     def slowest(self, n: int = 3) -> list:
         """本次会话最慢的 n 个工具（按各自最慢一次排）。"""
         ranked = [(name, max(durs)) for name, durs in self.tool_times.items() if durs]
         ranked.sort(key=lambda x: -x[1])
         return ranked[:n]
+
+    # -- 出错诊断 -----------------------------------------------------------
+    def _note_error(self, ev: dict, msg: dict) -> None:
+        """记一次工具出错。
+
+        从 tool/result 里挖三样东西：哪个工具、错在哪、第几回合第几步。
+        工具名要顺着 callId 回查（结果是异步回来的，事件本身不带名字）。
+        """
+        cid = msg.get("toolCallId")
+        name = self.calls.get(cid) or "?"
+        text = ""
+        content = msg.get("content")
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("text"):
+                    text = str(c["text"])
+                    break
+        if not text:
+            err = (ev.get("data") or {}).get("error")
+            text = str(err) if err else ""
+        # 第一行通常就是关键信息，后面的堆栈太长
+        first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        self.errors.append({
+            "tool": name,
+            "text": text[:4000],
+            "head": first[:200],
+            "turn": ev.get("data", {}).get("turn") if isinstance(ev.get("data"), dict) else None,
+            "step": ev.get("data", {}).get("step") if isinstance(ev.get("data"), dict) else None,
+            "at": ev.get("time"),
+        })
+        if len(self.errors) > 20:
+            del self.errors[:-20]
+
+    def last_error(self) -> Optional[dict]:
+        return self.errors[-1] if self.errors else None
+
+    def error_brief(self) -> str:
+        """一行摘要，给信息卡副行用。"""
+        e = self.last_error()
+        if not e:
+            return ""
+        where = ""
+        if e.get("turn") is not None and e.get("step") is not None:
+            where = pet_i18n.t("第 ") + f"{e['turn']}-{e['step']}" + pet_i18n.t(" 步")
+        head = e["head"] or pet_i18n.t("没有细节")
+        return f"{e['tool']} {pet_i18n.t('出错')}{where}：{head}"
 
     def poll(self) -> None:
         if not self.path:
@@ -335,6 +402,7 @@ class StatusWatcher:
     def _make_task(self, info: dict, with_tools: bool) -> TaskInfo:
         names = []
         slow = []
+        err = ""
         if with_tools:
             tail = self._tail(info["session_id"])
             tail.poll()
@@ -346,6 +414,9 @@ class StatusWatcher:
                 if not names and tail.last_tool:
                     names = [tail.last_tool]
             slow = tail.slowest(3)
+            # 出错的会话把「错在哪」带上去 —— 信息卡上只写"出错重试"等于没说
+            if info["state"] == "failed":
+                err = tail.error_brief()
         return TaskInfo(
             session_id=info["session_id"], state=info["state"], title=info["title"],
             provider=info["provider"], model=info["model"], turn=info["turn"],
@@ -354,6 +425,7 @@ class StatusWatcher:
             surface_tokens=info["surface_tokens"], context_window=info["context_window"],
             tokens_out=info["tokens_out"], mtime=info["mtime"], goal=info["goal"],
             queued=info["queued"], plan_active=info["plan_active"],
+            error=err,
             turn_open=info["turn_open"], slow_tools=slow)
 
     def _track_turns(self, infos: list) -> set:
@@ -434,7 +506,9 @@ class StatusWatcher:
         elif state == "waiting":
             snap.detail_line = pet_i18n.t("在等你回答")
         elif state == "failed":
-            snap.detail_line = pet_i18n.t("请求出错，正在重试")
+            # 只写「出错重试」等于没说 —— 把「哪个工具、错在哪」带出来。
+            # 挖不到细节才退回通用文案。
+            snap.detail_line = primary.error or pet_i18n.t("请求出错，正在重试")
         elif state == "celebrating":
             snap.detail_line = pet_i18n.t("任务已完成")
         elif state == "tools":
@@ -494,6 +568,10 @@ HEALTH_BREAK = 5 * 60            # 离开这么久算休息过
 
 
 def cursor_pos() -> tuple:
+    return pet_platform.cursor_pos()
+
+
+def _cursor_pos_win32() -> tuple:
     """当前鼠标的屏幕坐标。
 
     用 GetCursorPos 而不是 Tk 的 <Motion> —— 鼠标在窗口外时收不到 Motion 事件，
@@ -506,6 +584,10 @@ def cursor_pos() -> tuple:
 
 
 def idle_seconds() -> float:
+    return pet_platform.idle_seconds()
+
+
+def _idle_seconds_win32() -> float:
     """距上次键盘/鼠标输入过了多久（秒）。取不到就返回 0。"""
     class _LastInput(ctypes.Structure):
         _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]

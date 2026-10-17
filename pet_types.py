@@ -46,6 +46,7 @@ class TaskInfo:
     plan_active: bool = False                         # 处于计划模式
     turn_open: bool = False                           # 回合尚未结束
     slow_tools: list = field(default_factory=list)    # 本次会话最慢的几个工具 [(名字, 毫秒)]
+    error: str = ""                                   # 失败时错在哪（一行摘要）
 
     @property
     def elapsed_ms(self) -> Optional[float]:
