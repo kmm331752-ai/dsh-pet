@@ -38,6 +38,7 @@ from pet_base import *
 from pet_render import *
 # 下划线开头的名字 import * 带不出来，要显式引（这个坑踩过好几次了）
 from pet_render import _fmt_ms
+import pet_render          # 模块本身也要 —— `import *` 不带它
 from pet_sources import *          # 也带出 Mood
 from pet_system import *
 from pet_types import Snapshot, TaskInfo
@@ -200,9 +201,18 @@ class PetApp:
         self._preview_imgs = []
         self._feed_win = None
         self._feed_imgs = []
+        # 视线锚点（归一化，单帧坐标系）。默认底边中点 —— 和契约一致。
+        # 皮肤如果给了 gazeAnchor 就用它的。
+        self._gaze_anchor = (0.5, 1.0)
         self.wander_x = 0             # 溜达时窗口的水平偏移
 
         self.skin = load_skin(getattr(args, "skin", None) or self.cfg.get("skin", "dafeiyu"))
+        # 皮肤清单里的 gazeAnchor（OpenPets 的 pet.json / clawd 的 theme.json）
+        try:
+            self._gaze_anchor = pet_render.read_gaze_anchor(
+                getattr(self.skin, "manifest", None))
+        except Exception:                                # noqa: BLE001
+            self._gaze_anchor = (0.5, 1.0)
         self._build_sprites()
         self._bind_events()
         self._start_tray()
@@ -2327,6 +2337,45 @@ class PetApp:
         snap.phase = random.random()
         return snap
 
+    def _gaze_sprite(self, now: float):
+        """按鼠标位置取一个视线方向格子。取不到返回 None。
+
+        **只在鼠标刚动过的时候用**（1.2 秒内）—— 鼠标停着不动还一直盯着，
+        看着像卡住了。停下来了就回中性姿势，而不是回 idle 循环：
+        回循环的话头会自己动，反而像没在看你。
+
+        锚点是 `gazeAnchor`（归一化，从单帧左上角算），没有就用底边中点 ——
+        和契约的 `getCodexV2GazeAnchorPoint` 一致。
+        """
+        skin = self.skin
+        if not getattr(skin, "supports_gaze", False):
+            return None
+        # 拖动中不看她自己 —— 手在哪儿她跟着看很怪
+        if self._drag is not None or now - self._cursor_at > GAZE_IDLE_RESET_S:
+            return None
+
+        ax, ay = self._gaze_anchor_px()
+        idx = pet_render.quantize_gaze(self._cursor_prev[0] - ax,
+                                       self._cursor_prev[1] - ay)
+        if idx is None:
+            return skin.neutral_frame()
+        return skin.gaze_frame(idx, flipped=self.snap.mirror)
+
+    def _gaze_anchor_px(self) -> tuple:
+        """视线锚点的屏幕坐标。
+
+        锚点是在**单帧**里归一化的，所以要先把它换算到当前窗口几何上：
+        帧缩放后居中、底部贴着角色区底边。
+        """
+        try:
+            wx, wy = self.root.winfo_x(), self.root.winfo_y()
+        except Exception:                                # noqa: BLE001
+            return (0.0, 0.0)
+        fx, fy = getattr(self, "_gaze_anchor", (0.5, 1.0))
+        fw = self.win_w
+        fh = int(PET_AREA_H * self.scale * self.dpi)
+        return (wx + fx * fw, wy + fy * fh)
+
     def _tick(self):
         try:
             st = self.snap.state
@@ -2366,6 +2415,17 @@ class PetApp:
             sprite = frames[idx]
             self.snap.phase = t / loop
             self.frame_i += 1
+
+            # ── 16 方向视线 ──────────────────────────────────────────────
+            # v2 图集的第 9、10 行是 16 个视线方向格子。素材本来就在，
+            # 但之前只认 9 行，那两行从来没播过 —— "看向鼠标"只用 mirror
+            # 翻转，**2 个方向**，而契约给了 16 个。
+            #
+            # 优先级：交互反应 > 视线 > 状态动画。你碰她的时候先回应你，
+            # 其次是"她在看你"，最后才是她自己过日子。
+            gaze = self._gaze_sprite(now)
+            if gaze is not None and not react:
+                sprite = gaze
 
             # 交互装饰画在所有皮肤之上 —— 契约/clawd 的帧是预渲染的，
             # 画在 render_pet 里就只有内置皮肤能用了。

@@ -2045,6 +2045,115 @@ class TestActivitySource(unittest.TestCase):
             self.assertNotIn(bad, fields, f"Mood 里不该有 {bad}")
 
 
+class TestGazeMath(unittest.TestCase):
+    """16 方向视线的数学。
+
+    规格来自 OpenPets 的 `apps/desktop/src/codex-pets-core.ts` ——
+    v2 图集的第 9、10 行是 16 个视线方向格子，**不是动画**。
+
+    踩过：本项目原来写的是"后 2 行是它自己的扩展状态"（猜的），
+    `ATLAS_ROWS = 8, 9` 只认 9 行 —— 于是 11 行的图通过校验，
+    后两行**从来没播过**。"看向鼠标"只用 mirror 翻转，2 个方向。
+    """
+
+    def test_zero_is_straight_up_and_clockwise(self):
+        """0 = 正上，顺时针。来自契约的 `atan2(dx, -dy)`。"""
+        cases = [("正上", 0, -100, 0), ("正右", 100, 0, 4), ("正下", 0, 100, 8),
+                 ("正左", -100, 0, 12), ("右上", 70, -70, 2), ("右下", 70, 70, 6),
+                 ("左下", -70, 70, 10), ("左上", -70, -70, 14)]
+        for name, dx, dy, want in cases:
+            with self.subTest(direction=name):
+                self.assertEqual(PR.quantize_gaze(dx, dy), want)
+
+    def test_all_sixteen_sectors_are_reachable(self):
+        import math
+        got = set()
+        for i in range(720):
+            a = i * math.pi / 360
+            idx = PR.quantize_gaze(math.sin(a) * 200, -math.cos(a) * 200)
+            if idx is not None:
+                got.add(idx)
+        self.assertEqual(got, set(range(16)), f"有方向取不到：{sorted(set(range(16)) - got)}")
+
+    def test_dead_zone_returns_none(self):
+        self.assertIsNone(PR.quantize_gaze(0, 0))
+        self.assertIsNone(PR.quantize_gaze(3, 3))
+        self.assertIsNone(PR.quantize_gaze(PR.GAZE_DEAD_ZONE_PX - 1, 0))
+        self.assertIsNotNone(PR.quantize_gaze(PR.GAZE_DEAD_ZONE_PX + 1, 0))
+
+    def test_mirror(self):
+        self.assertEqual(PR.mirror_gaze(0), 0)
+        self.assertEqual(PR.mirror_gaze(1), 15)
+        self.assertEqual(PR.mirror_gaze(15), 1)
+        for i in range(16):
+            with self.subTest(index=i):
+                self.assertEqual(PR.mirror_gaze(PR.mirror_gaze(i)), i, "镜像两次该回自己")
+
+    def test_cell_mapping(self):
+        """0~7 在行 9，8~15 在行 10。"""
+        for i in range(8):
+            self.assertEqual(PR.gaze_cell(i), (9, i))
+        for i in range(8, 16):
+            self.assertEqual(PR.gaze_cell(i), (10, i - 8))
+
+    def test_cell_mapping_flipped(self):
+        """翻图时要先镜像索引 —— 否则翻过来方向是反的。"""
+        self.assertEqual(PR.gaze_cell(1, flipped=True), PR.gaze_cell(15))
+        self.assertEqual(PR.gaze_cell(4, flipped=True), PR.gaze_cell(12))
+        self.assertEqual(PR.gaze_cell(0, flipped=True), PR.gaze_cell(0))
+
+    def test_read_gaze_anchor(self):
+        self.assertEqual(PR.read_gaze_anchor({"gazeAnchor": {"x": 0.5, "y": 0.32}}),
+                         (0.5, 0.32))
+        # 没有 / 非法 -> 底边中点（契约的默认）
+        self.assertEqual(PR.read_gaze_anchor({}), (0.5, 1.0))
+        self.assertEqual(PR.read_gaze_anchor(None), (0.5, 1.0))
+        self.assertEqual(PR.read_gaze_anchor({"gazeAnchor": {"x": 9, "y": 0.5}}),
+                         (0.5, 1.0), "越界的该被拒")
+        self.assertEqual(PR.read_gaze_anchor({"gazeAnchor": "nope"}), (0.5, 1.0))
+
+
+class TestGazeSkin(unittest.TestCase):
+    """皮肤真的拿得出 16 个格子吗。"""
+
+    def test_openpets_skin_supports_gaze(self):
+        sk = PR.load_skin("openpets")
+        self.assertTrue(sk.supports_gaze, "v2 图集该支持视线")
+        for i in range(16):
+            with self.subTest(index=i):
+                self.assertIsNotNone(sk.gaze_frame(i), f"方向 {i} 取不到格子")
+        self.assertIsNotNone(sk.neutral_frame(), "取不到中性姿势")
+
+    def test_skin_reads_its_manifest(self):
+        """gazeAnchor 写在清单里，皮肤要读得到。"""
+        sk = PR.load_skin("openpets")
+        self.assertTrue(getattr(sk, "manifest", None), "没读到 pet.json")
+        self.assertIn("gazeAnchor", sk.manifest)
+        self.assertEqual(PR.read_gaze_anchor(sk.manifest), (0.5, 0.32))
+
+    def test_builtin_skin_does_not_support_gaze(self):
+        """内置皮肤是程序化画的，**根本不是 AtlasSkin** —— 没有这些方法。
+
+        所以这里断言的是**真实行为**（App 不崩、取不到视线帧），
+        不是"皮肤有没有这个方法"：
+
+          · `_gaze_sprite` 用 `getattr(skin, "supports_gaze", False)` ——
+            没有这个属性就是**不支持**，提前返回 None。
+          · 第一版测试默认值写成 True（把"没这个属性"当成"支持"），
+            第二版又去调 `sk.gaze_frame(0)`（那方法压根不存在）——
+            两次都是在测"我以为的接口"，不是在测真行为。
+        """
+        sk = PR.load_skin("dafeiyu")
+        self.assertFalse(getattr(sk, "supports_gaze", False))
+        self.assertNotIsInstance(sk, PR.AtlasSkin)
+
+    def test_out_of_range_index_is_none(self):
+        sk = PR.load_skin("openpets")
+        self.assertIsNone(sk.gaze_frame(-1))
+        self.assertIsNone(sk.gaze_frame(16))
+        self.assertIsNone(sk.gaze_frame(999))
+
+
 class TestOpenPetsPackage(unittest.TestCase):
     """OpenPets 宠物包契约。
 

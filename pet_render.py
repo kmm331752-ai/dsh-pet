@@ -335,6 +335,63 @@ def render_pet(state: str, phase: float) -> Image.Image:
 #   行 5 出错   6 等待回复  7 专注干活  8 思考审阅
 # 任何符合契约的皮肤包都能直接导入（clawd-on-desk 主题、kun-like 精灵图等）。
 
+# ── v2 契约的 16 方向视线 ────────────────────────────────────────────────
+# 规格来自 OpenPets 的 apps/desktop/src/codex-pets-core.ts。
+# v2 图集是 8×11，比 v1 多的**第 9、10 行不是动画，是 16 个视线方向格子**。
+GAZE_SECTORS = 16
+GAZE_SECTOR_ANGLE = 2 * math.pi / GAZE_SECTORS
+GAZE_DEAD_ZONE_PX = 24          # 光标离锚点这么近就用中性姿势
+GAZE_IDLE_RESET_MS = 1200       # 光标这么久没动就回中性
+GAZE_ROWS = (9, 10)             # 前 8 个方向在 9 行，后 8 个在 10 行
+NEUTRAL_CELL = (0, 6)           # 契约规定的中性姿势
+
+
+def quantize_gaze(dx: float, dy: float, dead_zone: float = GAZE_DEAD_ZONE_PX):
+    """光标相对锚点的偏移 -> 方向索引 0~15。太近返回 None（中性）。
+
+    **0 是正上方，顺时针。** 这来自契约里的 `atan2(dx, -dy)` ——
+    注意第二个参数是 **-dy**，所以屏幕坐标（y 向下）也能得到"上 = 0"。
+    """
+    if math.hypot(dx, dy) <= dead_zone:
+        return None
+    angle = math.atan2(dx, -dy)
+    sector = math.floor((angle + GAZE_SECTOR_ANGLE / 2) / GAZE_SECTOR_ANGLE)
+    return (sector + GAZE_SECTORS) % GAZE_SECTORS
+
+
+def mirror_gaze(index: int) -> int:
+    """镜像一个方向索引。给"图被水平翻转"的情况用。
+
+    我们翻图（`ImageOps.mirror`）的时候方向也跟着反了，所以要先镜像索引，
+    翻过来才是对的方向 —— 契约的 `getCodexV2GazeSpritePosition` 就是这么做的。
+    """
+    return (GAZE_SECTORS - index) % GAZE_SECTORS
+
+
+def gaze_cell(index: int, flipped: bool = False) -> tuple:
+    """方向索引 -> 图集 (行, 列)。"""
+    i = mirror_gaze(index) if flipped else index
+    row = GAZE_ROWS[0] if i < 8 else GAZE_ROWS[1]
+    return (row, i if i < 8 else i - 8)
+
+
+def read_gaze_anchor(manifest) -> tuple:
+    """从清单里读 gazeAnchor（归一化 [0,1]）。没有返回 (0.5, 1.0)。
+
+    默认是**底边中点** —— 契约里 `getCodexV2GazeAnchorPoint` 在没有
+    gazeAnchor 时就是这么算的（`bounds.y + bounds.height`）。
+    """
+    ga = (manifest or {}).get("gazeAnchor")
+    if isinstance(ga, dict):
+        try:
+            x, y = float(ga["x"]), float(ga["y"])
+            if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0:
+                return (x, y)
+        except (KeyError, TypeError, ValueError):
+            pass
+    return (0.5, 1.0)
+
+
 ATLAS_COLS, ATLAS_ROWS = 8, 9
 ATLAS_CW, ATLAS_CH = 192, 208
 ATLAS_SIZE = (ATLAS_COLS * ATLAS_CW, ATLAS_ROWS * ATLAS_CH)
@@ -393,8 +450,11 @@ class AtlasSkin:
         self.path, self.name, self.display = path, name, display
         self.target_h = target_h
         self.sheet = Image.open(path).convert("RGBA")
-        # 契约固定了「8 列 × 192 宽」与前 9 行的含义；行数允许更多 ——
-        # openpets 就是 11 行（前 9 行同契约，后 2 行是它自己的扩展状态）。
+        # 契约固定了「8 列 × 192 宽」与前 9 行的含义；行数允许更多。
+        #
+        # **第 9、10 行不是"扩展状态"，是 16 个视线方向格子**（v2 契约）。
+        # 原来这里写的是"openpets 自己的扩展状态"—— 猜错了，一直没播过那两行。
+        # 见 GAZE_ROWS 那一段的注释。
         w, h = self.sheet.size
         if w != ATLAS_COLS * ATLAS_CW or h < ATLAS_ROWS * ATLAS_CH or h % ATLAS_CH:
             raise ValueError(
@@ -402,6 +462,21 @@ class AtlasSkin:
                 f"高为 {ATLAS_CH} 的整数倍且不少于 {ATLAS_ROWS * ATLAS_CH}")
         self._rows: dict = {}
         self._cache: dict = {}
+        # 同目录的清单：OpenPets 用 pet.json，clawd 主题用 theme.json。
+        # gazeAnchor 就写在里面（归一化，单帧坐标系）。
+        self.manifest: dict = {}
+        for fn in ("pet.json", "theme.json"):
+            mp = os.path.join(os.path.dirname(self.path), fn)
+            if not os.path.exists(mp):
+                continue
+            try:
+                with open(mp, encoding="utf-8-sig") as fh:
+                    got = json.load(fh)
+                if isinstance(got, dict):
+                    self.manifest = got
+                    break
+            except Exception:                            # noqa: BLE001
+                continue
 
     def _row(self, row: int) -> list:
         if row not in self._rows:
@@ -440,6 +515,38 @@ class AtlasSkin:
             return []
         mid, _last = ATLAS_TIMING.get(3, (140, 280))
         return [(self._frame("idle", 3, i), mid) for i in range(len(cells))]
+
+    # -- 16 方向视线 --------------------------------------------------------
+    @property
+    def supports_gaze(self) -> bool:
+        """这张图有没有 v2 的视线格子。
+
+        **判据是"那两行真的有内容"，不是"图够高"** —— 图够高只说明
+        h 是 208 的整数倍，作者可能只画了前 9 行。
+        """
+        return bool(self._row(GAZE_ROWS[0]) and self._row(GAZE_ROWS[1]))
+
+    def gaze_frame(self, index: int, flipped: bool = False):
+        """取一个方向格子（已合成光晕/落影）。索引不合法返回 None。"""
+        if not (0 <= index < GAZE_SECTORS):
+            return None
+        row, col = gaze_cell(index, flipped)
+        cells = self._row(row)
+        if col >= len(cells):
+            return None
+        return self._frame("idle", row, col)
+
+    def neutral_frame(self):
+        """契约规定的中性姿势（row 0, col 6）。
+
+        死区里、或者光标不动了就用它 —— 而不是回落到 idle 循环，
+        那样头会自己动，看起来像没在看你。
+        """
+        row, col = NEUTRAL_CELL
+        cells = self._row(row)
+        if col >= len(cells):
+            return None
+        return self._frame("idle", row, col)
 
 
 # ── clawd-on-desk 主题格式 ──────────────────────────────────────────────────

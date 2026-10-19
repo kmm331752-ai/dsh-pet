@@ -569,6 +569,8 @@ NIGHT_HOURS = (23, 7)            # [23:00, 07:00)
 HEALTH_ON = True
 # 同一个应用连续待多久算"待太久"（提醒起来动动）
 SAME_APP_LONG_S = 50 * 60
+# 鼠标停这么久就回中性姿势（契约里的 codexV2GazeIdleResetMs）
+GAZE_IDLE_RESET_S = 1.2
 HEALTH_EVERY = 50 * 60           # 连续活动多久提醒一次
 HEALTH_FIRST = 45 * 60           # 启动后多久开始算（别一开就提醒）
 HEALTH_BREAK = 5 * 60            # 离开这么久算休息过

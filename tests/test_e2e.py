@@ -1169,5 +1169,110 @@ class TestWorksWithoutDSH(E2EBase):
             self.assertEqual(app2.companion.mood.feeds, feeds)
 
 
+class TestGazeEndToEnd(E2EBase):
+    """16 方向视线：走 _tick，**断言像素**。
+
+    素材本来就在图里 —— v2 图集的第 9、10 行是 16 个视线方向格子，
+    但代码只认 9 行，那两行从来没播过。所以这一组测的是
+    "鼠标动一下，推给屏幕的画面真的变了"。
+    """
+
+    def _app(self, skin="openpets"):
+        app = self.make_app(force_state=None, no_companion=False, skin=skin)
+        return app
+
+    @staticmethod
+    def _put_cursor(app, dx, dy):
+        """把光标放到锚点偏移 (dx, dy)，并假装刚动过。"""
+        ax, ay = app._gaze_anchor_px()
+        app._cursor_prev = (int(ax + dx), int(ay + dy))
+        app._cursor_at = time.time()
+
+    def _shot(self, app):
+        """跑一帧，拿推给屏幕的画布。"""
+        grabbed = []
+        orig = app.display.push
+        app.display.push = lambda img: (grabbed.append(img.copy()), orig(img))[1]
+        try:
+            app._tick()
+        finally:
+            app.display.push = orig
+        return grabbed[-1] if grabbed else None
+
+    def test_different_directions_reach_the_screen(self):
+        """四个方向推给屏幕的画布必须两两不同。
+
+        断言 `_gaze_sprite()` 返回不同对象只能证明取到了不同格子，
+        证明不了**画上去了** —— 中间还可能被镜像、配饰、装饰覆盖。
+        """
+        app = self._app()
+        self.assertTrue(app.skin.supports_gaze, "openpets 皮肤该支持视线")
+        shots = {}
+        for name, dx, dy in (("上", 0, -200), ("右", 200, 0),
+                             ("下", 0, 200), ("左", -200, 0)):
+            self._put_cursor(app, dx, dy)
+            shots[name] = self._shot(app)
+            self.assertIsNotNone(shots[name], f"{name} 没画面")
+        for a, b in (("上", "下"), ("左", "右"), ("上", "左")):
+            with self.subTest(pair=f"{a}/{b}"):
+                box = self.diff_box(shots[a], shots[b])
+                self.assertIsNotNone(box, f"{a} 和 {b} 画面一样 —— 视线没生效")
+
+    def test_stopping_the_cursor_returns_to_neutral(self):
+        """鼠标停 1.2 秒以上就回中性 —— 一直盯着看像卡住了。"""
+        app = self._app()
+        self._put_cursor(app, 200, 0)
+        moving = self._shot(app)
+        app._cursor_at = time.time() - 5.0
+        still = self._shot(app)
+        self.assertIsNotNone(self.diff_box(moving, still),
+                             "停下来后画面没变")
+
+    def test_dead_zone_uses_neutral(self):
+        app = self._app()
+        self._put_cursor(app, 3, 3)                 # 死区内
+        inside = self._shot(app)
+        self._put_cursor(app, 0, -200)              # 正上
+        up = self._shot(app)
+        self.assertIsNotNone(self.diff_box(inside, up))
+
+    def test_not_gazing_while_dragging(self):
+        """拖动中不看她自己 —— 手在哪儿她跟着看很怪。"""
+        app = self._app()
+        self._put_cursor(app, 200, 0)
+        gazing = self._shot(app)
+        app._drag = (0, 0, 0)
+        try:
+            dragging = self._shot(app)
+        finally:
+            app._drag = None
+        self.assertIsNotNone(self.diff_box(gazing, dragging))
+
+    def test_skin_without_gaze_is_unaffected(self):
+        """内置皮肤没有视线格子 —— 不能因此崩，也不能画错。"""
+        app = self._app(skin="dafeiyu")
+        self.assertFalse(getattr(app.skin, "supports_gaze", False))
+        self._put_cursor(app, 200, 0)
+        self.assertIsNone(app._gaze_sprite(time.time()))
+        self.assertIsNotNone(self._shot(app))
+
+    def test_mirror_compensation(self):
+        """图被翻转时取的是镜像格子 —— 否则翻过来方向是反的。"""
+        app = self._app()
+        self._put_cursor(app, 200, 0)
+        app.snap.mirror = True
+        flipped = app._gaze_sprite(time.time())
+        app.snap.mirror = False
+        normal = app._gaze_sprite(time.time())
+        self.assertIsNotNone(flipped)
+        self.assertIsNotNone(normal)
+        self.assertIsNot(flipped, normal, "翻转和没翻转取到同一张缓存图 = 没补偿")
+
+    def test_anchor_comes_from_the_manifest(self):
+        app = self._app()
+        self.assertEqual(app._gaze_anchor, (0.5, 0.32),
+                         "没从 pet.json 读到 gazeAnchor")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
