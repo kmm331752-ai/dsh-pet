@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import pet_food
+
 import argparse
 import ctypes
 import json
@@ -183,6 +185,8 @@ class PetApp:
         self._sess_win = None
         self._preview_win = None
         self._preview_imgs = []
+        self._feed_win = None
+        self._feed_imgs = []
         self.wander_x = 0             # 溜达时窗口的水平偏移
 
         self.skin = load_skin(getattr(args, "skin", None) or self.cfg.get("skin", "dafeiyu"))
@@ -293,7 +297,8 @@ class PetApp:
             except Exception:                            # noqa: BLE001
                 pass
         self.menu = self.tk.Menu(r, tearoff=0)
-        self.menu.add_command(label=t("喂一口") + " 🍡", command=self._feed)
+        self.menu.add_command(label=t("喂她吃点什么") + " 🍡",
+                              command=self._open_feed_window)
         self.menu.add_command(label=t("展开详情") + "/" + t("收起详情"), command=self._toggle_detail)
         self.menu.add_separator()
         self.menu.add_command(label=t("自动跟随活跃会话"), command=self._follow_auto)
@@ -1743,15 +1748,125 @@ class PetApp:
                 self._say(say_line("EDGE_LINES"), 2.4)
         self._save_config()
 
-    def _feed(self):
-        """喂一口：精力大涨，亲密度涨得最多。"""
+    # -- 喂食 ---------------------------------------------------------------
+    def _open_feed_window(self) -> None:
+        """选食物的小窗口：12 个图标，点一下喂。
+
+        原来只有一个「喂一口」菜单项，喂什么都一样 —— 有了素材就该看得见。
+        图标下面标出她爱不爱吃：最爱画颗心，不爱吃的打叉。
+        """
+        tk = self.tk
         if self.companion is None:
             return
-        self.companion.touch("feed")
-        self.companion.say(say_line("FEED_LINES"), 3.5)
+        if getattr(self, "_feed_win", None) is not None:
+            try:
+                self._feed_win.destroy()
+            except Exception:                            # noqa: BLE001
+                pass
+        win = tk.Toplevel(self.root)
+        self._feed_win = win
+        win.title(t("喂她吃点什么"))
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+
+        m = self.companion.mood
+        head = tk.Frame(win)
+        head.pack(fill="x", padx=12, pady=(10, 2))
+        tk.Label(head, text=t("饱足"), anchor="w").pack(side="left")
+        bar = tk.Canvas(head, width=150, height=12, highlightthickness=0, bg="#2A2E3A")
+        bar.pack(side="left", padx=8)
+        pct = max(0.0, min(1.0, getattr(m, "satiety", 0.0)))
+        bar.create_rectangle(0, 0, int(150 * pct), 12,
+                             fill="#5BC98B" if pct < pet_food.FULL_AT else "#E8A33D",
+                             outline="")
+        tk.Label(head, text=f"{int(pct * 100)}%", anchor="w").pack(side="left")
+
+        grid = tk.Frame(win)
+        grid.pack(padx=12, pady=(6, 4))
+        self._feed_imgs = []                             # 留引用，不然被 GC
+        cols = 4
+        for i, fid in enumerate(pet_food.FOOD_IDS):
+            cell = tk.Frame(grid)
+            cell.grid(row=i // cols, column=i % cols, padx=4, pady=4)
+            path = pet_food.food_path(fid, assets_dir())
+            btn_kw = {"relief": "flat", "bd": 0, "highlightthickness": 0,
+                      "command": lambda f=fid: self._do_feed(f)}
+            if path:
+                try:
+                    im = Image.open(path).convert("RGBA").resize((52, 52), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(im)
+                    self._feed_imgs.append(photo)
+                    tk.Button(cell, image=photo, **btn_kw).pack()
+                except Exception as exc:                 # noqa: BLE001
+                    log_error(f"加载食物图失败：{fid}", exc)
+                    tk.Button(cell, text="🍽", width=4, height=2, **btn_kw).pack()
+            else:
+                tk.Button(cell, text="🍽", width=4, height=2, **btn_kw).pack()
+            # 最爱 / 不爱吃的标记单独一个 Label —— 挤在名字里看不出来
+            is_fav = fid in (m.favorites or ())
+            is_bad = fid == m.dislike
+            name_row = tk.Frame(cell)
+            name_row.pack()
+            tk.Label(name_row, text=pet_food.food_label(fid),
+                     font=("Microsoft YaHei UI", 8)).pack(side="left")
+            if is_fav:
+                tk.Label(name_row, text="♥", fg="#E05A6B",
+                         font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
+            elif is_bad:
+                tk.Label(name_row, text="✕", fg="#7A8296",
+                         font=("Microsoft YaHei UI", 8)).pack(side="left")
+
+        tk.Label(win, text=t("♥ 爱吃的 · ✕ 不太爱"), fg="#888",
+                 font=("Microsoft YaHei UI", 8)).pack(pady=(0, 2))
+        tk.Button(win, text=t("关闭"),
+                  command=lambda: (win.destroy(),
+                                   setattr(self, "_feed_win", None))).pack(pady=(0, 10))
+
+    def _do_feed(self, fid: str) -> None:
+        """喂一口指定的食物。"""
+        if self.companion is None:
+            return
+        m = self.companion.mood
+        res = pet_food.apply(fid, m, m.favorites, m.dislike)
+
+        if not res["ok"]:
+            if res["reason"] == "full":
+                self.companion.say(say_line("FULL_LINES"), 3.0)
+                self._play_sound("pet")
+            return
+
+        try:
+            m.food_counts[fid] = int(m.food_counts.get(fid, 0)) + 1
+        except Exception:                                # noqa: BLE001
+            m.food_counts = {fid: 1}
+
+        if res["favorite"]:
+            self.companion.say(say_line("FAVORITE_LINES"), 3.5)
+        elif res["dislike"]:
+            self.companion.say(say_line("DISLIKE_LINES"), 3.0)
+        else:
+            self.companion.say(say_line(f"FOOD_{fid.upper()}_LINES"), 3.5)
+
         durs = self.reaction_durs.get("poke") or []
         if durs:
             self.poke_until = time.time() + sum(durs) / 1000.0
+        self.companion.touch("feed")
+        self.companion.save()
+        self._play_sound("feed")
+
+        # 喂完刷新窗口上的饱足条
+        w = getattr(self, "_feed_win", None)
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:                            # noqa: BLE001
+                pass
+            self._feed_win = None
+            self._open_feed_window()
+
+    def _feed(self):
+        """快捷键 / 托盘用的：喂默认那一口（团子）。"""
+        self._do_feed("dango")
 
     def _toggle_detail(self):
         self.detail = not self.detail

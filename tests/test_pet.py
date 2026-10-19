@@ -30,6 +30,7 @@ import dsh_pet as P  # noqa: E402
 import pet_accessories as A  # noqa: E402
 import pet_base as B  # noqa: E402
 import pet_chat as C  # noqa: E402
+import pet_food as FD  # noqa: E402
 import pet_i18n as I  # noqa: E402
 import pet_platform as PF  # noqa: E402
 import pet_sources as S  # noqa: E402
@@ -355,11 +356,22 @@ class TestSourceSanity(unittest.TestCase):
         say_line("KEY")。第一版写死了，把 MORNING/NIGHT 误报成没接线 ——
         而它同时也漏掉了 DIZZY/GRAB/EDGE 这三组真的没接的。
         """
+        # FOOD_*_LINES 是**动态拼的键**（f"FOOD_{fid.upper()}_LINES"），
+        # 源码里搜不到字面量。它们不是孤儿 —— 由 _do_feed 按食物 id 取。
+        # 这一条改不了写成字面量：12 种食物写 12 个 if 只是为了让测试好写。
+        dynamic = {f"FOOD_{f.upper()}_LINES" for f in FD.FOOD_IDS}
         for key in P.LINES:
+            if key in dynamic:
+                continue
             with self.subTest(key=key):
                 self.assertRegex(
                     self.src, rf'say_line\([^)]*"{key}"',
                     f"{key} 定义了但没有任何地方 say_line 它")
+        # 动态的那批另外确认：pet_food 里每一种都有台词，且键对得上
+        for fid in FD.FOOD_IDS:
+            with self.subTest(dynamic=fid):
+                self.assertIn(f"FOOD_{fid.upper()}_LINES", P.LINES)
+                self.assertTrue(FD.FOODS[fid]["line"])
 
 
 class TestErrorLog(unittest.TestCase):
@@ -929,9 +941,15 @@ class TestI18n(unittest.TestCase):
 
     def test_t_lines(self):
         I.set_language("en")
-        self.assertEqual(I.t_lines(["嘿嘿", "好吃！"]), ["Hehe", "Tasty!"])
+        # 样本要用**确实存在**的台词。原来用的是 "好吃！"（旧 FEED_LINES 的），
+        # 那句随「喂一口」一起删掉之后，这条测试就挂了 —— 它测的是 t_lines，
+        # 却依赖某句具体台词还在。用一句稳定的。
+        sample = S.PET_LINES[0]
+        got = I.t_lines([sample])
+        self.assertEqual(len(got), 1)
+        self.assertNotEqual(got[0], sample, "没翻译")
         I.set_language("zh")
-        self.assertEqual(I.t_lines(["嘿嘿"]), ["嘿嘿"])
+        self.assertEqual(I.t_lines([sample]), [sample])
 
     @staticmethod
     def _flat(text: str) -> str:
@@ -1762,6 +1780,154 @@ class TestPlatformLayer(unittest.TestCase):
             root.destroy()
         except Exception as exc:                         # noqa: BLE001
             self.fail(f"AlphaDisplay 建不起来：{exc}")
+
+
+class TestFeeding(unittest.TestCase):
+    """喂食。
+
+    素材来自 microsoft/fluentui-emoji（**MIT**）。挑它是因为干净 ——
+    对比过的 OpenMoji 是 CC-BY-SA（SA 有传染性，和本项目的 MIT 冲突），
+    Twemoji 的代码 MIT 但美术是 CC-BY 4.0。
+
+    机制上最重要的一条：**饱足和精力分开了**。原来只有 energy 一个值兼着
+    当饥饱，于是「喂饱了」和「精神好」是同一件事 —— 说不通。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-pet-food-")
+        self._orig = B.data_dir
+        B.data_dir = lambda: self.tmp
+
+    def tearDown(self):
+        B.data_dir = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ── 素材 ──
+    def test_every_food_has_an_image(self):
+        missing = [f for f in FD.FOOD_IDS
+                   if not os.path.exists(FD.food_path(f, B.assets_dir()))]
+        self.assertEqual(missing, [], f"这些食物没有素材：{missing}")
+
+    def test_every_food_has_a_label_and_lines(self):
+        for fid in FD.FOOD_IDS:
+            with self.subTest(food=fid):
+                self.assertTrue(FD.food_label(fid))
+                self.assertNotEqual(FD.food_label(fid), fid, "没翻译")
+                self.assertTrue(FD.FOODS[fid]["line"], "没有台词")
+
+    def test_food_lines_are_wired_into_the_table(self):
+        """每种食物的台词都要在 LINES 表里 —— 否则 say_line 拿不到。"""
+        for fid in FD.FOOD_IDS:
+            with self.subTest(food=fid):
+                self.assertIn(f"FOOD_{fid.upper()}_LINES", S.LINES)
+        for key in ("FULL_LINES", "DISLIKE_LINES", "FAVORITE_LINES"):
+            self.assertIn(key, S.LINES, f"{key} 没进 LINES 表")
+
+    # ── 口味 ──
+    def test_new_pet_gets_preferences(self):
+        import random
+        rng = random.Random(7)
+        favs = FD.pick_favorites(rng)
+        bad = FD.pick_dislike(rng, favs)
+        self.assertEqual(len(favs), 2)
+        self.assertIn(bad, FD.FOOD_IDS)
+        self.assertNotIn(bad, favs, "不爱吃的和最爱的撞了")
+
+    def test_preferences_survive_a_restart(self):
+        c = S.CompanionSource()
+        favs, bad = list(c.mood.favorites), c.mood.dislike
+        self.assertTrue(favs)
+        c.save()
+        c2 = S.CompanionSource()
+        self.assertEqual(c2.mood.favorites, favs)
+        self.assertEqual(c2.mood.dislike, bad)
+
+    # ── 吃 ──
+    def test_eating_raises_satiety_and_energy(self):
+        m = S.Mood()
+        m.satiety, m.energy = 0.0, 0.5
+        r = FD.apply("ramen", m, [], "")
+        self.assertTrue(r["ok"])
+        self.assertGreater(m.satiety, 0.0)
+        self.assertGreater(m.energy, 0.5)
+        # feeds 不在这里数 —— 那是 touch("feed") 的活。两边都加会数两次。
+        self.assertEqual(m.feeds, 0)
+
+    def test_favorite_is_better_but_not_more_filling(self):
+        """最爱更开心、更有精神，但**不该更顶饱**。
+
+        踩过：第一版用一个 mult 套所有维度，最爱的 satiety 也乘了 1.5 ——
+        爱吃的反而更管饱，说不通。
+        """
+        m1, m2 = S.Mood(), S.Mood()
+        m1.satiety = m2.satiety = 0.0
+        r_plain = FD.apply("cookie", m1, [], "")
+        r_fav = FD.apply("cookie", m2, ["cookie"], "")
+        self.assertGreater(r_fav["affection"], r_plain["affection"])
+        self.assertGreater(r_fav["energy"], r_plain["energy"])
+        self.assertAlmostEqual(r_fav["satiety"], r_plain["satiety"], places=6,
+                               msg="最爱吃的不该更顶饱")
+
+    def test_dislike_is_weaker(self):
+        m1, m2 = S.Mood(), S.Mood()
+        m1.satiety = m2.satiety = 0.0
+        r_plain = FD.apply("candy", m1, [], "")
+        r_bad = FD.apply("candy", m2, [], "candy")
+        self.assertTrue(r_bad["dislike"])
+        self.assertLess(r_bad["energy"], r_plain["energy"])
+        self.assertLess(r_bad["affection"], r_plain["affection"])
+
+    def test_refuses_when_full(self):
+        m = S.Mood()
+        m.satiety = FD.FULL_AT + 0.01
+        r = FD.apply("candy", m, [], "")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "full")
+        self.assertEqual(m.feeds, 0, "拒绝了不该算喂过")
+
+    def test_unknown_food_does_not_crash(self):
+        m = S.Mood()
+        r = FD.apply("不存在", m, [], "")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "unknown")
+
+    def test_satiety_does_not_exceed_full(self):
+        m = S.Mood()
+        for _ in range(20):
+            m.satiety = min(FD.FULL_AT - 0.01, m.satiety)
+            FD.apply("ramen", m, [], "")
+        self.assertLessEqual(m.satiety, FD.STUFFED_AT + 1e-9)
+
+    # ── 饱足随时间掉 ──
+    def test_satiety_decays_over_time(self):
+        c = S.CompanionSource()
+        c.mood.satiety = 1.0
+        c._settle_energy(time.time(), 600)              # 10 分钟
+        self.assertLess(c.mood.satiety, 1.0)
+        self.assertGreater(c.mood.satiety, 0.0, "掉太快了")
+
+    def test_satiety_decays_even_while_sleeping(self):
+        """睡着也在消化 —— 不分状态。"""
+        c = S.CompanionSource()
+        c.state = "sleeping"
+        c.mood.satiety = 0.8
+        c._settle_energy(time.time(), 600)
+        self.assertLess(c.mood.satiety, 0.8)
+
+    def test_satiety_never_goes_negative(self):
+        c = S.CompanionSource()
+        c.mood.satiety = 0.01
+        c._settle_energy(time.time(), 100000)
+        self.assertEqual(c.mood.satiety, 0.0)
+
+    def test_old_save_without_the_new_fields_gets_them(self):
+        """老存档没有 satiety / favorites，读的时候要补上。"""
+        with open(B.mood_path(), "w", encoding="utf-8") as fh:
+            json.dump({"affection": 0.7, "pokes": 5}, fh)
+        c = S.CompanionSource()
+        self.assertTrue(c.mood.favorites, "没补上口味")
+        self.assertTrue(c.mood.dislike, "没补上不爱吃的")
+        self.assertAlmostEqual(c.mood.affection, 0.7, msg="老数据丢了")
 
 
 class TestConfig(unittest.TestCase):

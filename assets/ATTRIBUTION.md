@@ -155,3 +155,44 @@ https://raw.githubusercontent.com/1190fasheqi/dafeiyu-pet/main/sprites/背面_30
 
 本项目与它们的路线不同：**独立进程 + 只读会话投影缓存**，
 因此不需要安装 DSH 插件，也不改动 DSH 本身。
+
+## 食物素材
+
+`assets/food/*.png` —— 12 个食物图标。
+
+来源：[microsoft/fluentui-emoji](https://github.com/microsoft/fluentui-emoji)
+**MIT License, Copyright (c) Microsoft Corporation.**
+
+从上游的 `assets/<名字>/Color/<名字>_color.svg` 取 SVG，用 `tools/fetch_food.py`
+光栅化成 128×128 PNG（走 svglib → PDF → pypdfium2，和 clawd 主题同一条路）。
+
+| 本项目 | 上游 |
+|---|---|
+| `food/dango.png` | `assets/Dango/Color/dango_color.svg` |
+| `food/cookie.png` | `assets/Cookie/Color/cookie_color.svg` |
+| `food/shortcake.png` | `assets/Shortcake/Color/shortcake_color.svg` |
+| `food/ramen.png` | `assets/Steaming bowl/Color/steaming_bowl_color.svg` |
+| `food/riceball.png` | `assets/Rice ball/Color/rice_ball_color.svg` |
+| `food/onigiri.png` | `assets/Cooked rice/Color/cooked_rice_color.svg` |
+| `food/candy.png` | `assets/Candy/Color/candy_color.svg` |
+| `food/bubbletea.png` | `assets/Bubble tea/Color/bubble_tea_color.svg` |
+| `food/fish.png` | `assets/Fish/Color/fish_color.svg` |
+| `food/chocolate.png` | `assets/Chocolate bar/Color/chocolate_bar_color.svg` |
+| `food/strawberry.png` | `assets/Strawberry/Color/strawberry_color.svg` |
+| `food/teacup.png` | `assets/Teacup without handle/Color/teacup_without_handle_color.svg` |
+
+需要重新拉：`python tools/fetch_food.py`。
+
+### 为什么是这一套
+
+对比过的其他 emoji 集：
+
+| 项目 | 许可 | 结论 |
+|---|---|---|
+| **fluentui-emoji** | **MIT** | ✅ 用了 |
+| Noto Emoji | OFL-1.1 | 可用，但风格偏写实，和 Q 版角色不搭 |
+| Twemoji | 代码 MIT，**美术 CC-BY 4.0** | 署名要求之外还约束改图，不如 MIT 干净 |
+| OpenMoji | **CC-BY-SA-4.0** | ❌ SA 有传染性，和本仓库的 MIT 冲突（同理拒过鲸鱼娘） |
+
+**MIT 是关键**：这些图标要跟着 exe 一起分发，许可必须允许商用、允许修改、
+不要求衍生作品用同样的许可。

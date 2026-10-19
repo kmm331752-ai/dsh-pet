@@ -380,6 +380,41 @@ class TestAppSmoke(unittest.TestCase):
         app._sess_win.destroy()
         app._sess_win = None
 
+    def _app_with_companion(self):
+        """建一个带 companion 的 app。
+
+        force_state / demo 都会把 companion 关掉，而喂食必须有它 ——
+        所以直接塞一个（和 e2e 里 TestObservedMemory 的做法一样）。
+        """
+        import pet_sources as _S
+        app = self._app()
+        app.root.update()
+        app.companion = _S.CompanionSource()
+        return app
+
+    def test_feed_window_opens(self):
+        """喂食窗口要能开，12 个食物都要有图。"""
+        app = self._app_with_companion()
+        self._open_and_check(app, app._open_feed_window, "喂食窗口")
+        self.assertGreaterEqual(len(app._feed_imgs), 10, "食物图没加载出来")
+        app._feed_win = None
+
+    def test_feeding_changes_satiety(self):
+        """喂一口，饱足要涨。走 _do_feed，不是直接调 pet_food。"""
+        app = self._app_with_companion()
+        m = app.companion.mood
+        m.satiety = 0.0
+        app._do_feed("ramen")
+        self.assertGreater(m.satiety, 0.0, "喂了但饱足没涨")
+        self.assertEqual(m.feeds, 1)
+
+    def test_feeding_when_full_does_nothing(self):
+        app = self._app_with_companion()
+        m = app.companion.mood
+        m.satiety = 0.99
+        app._do_feed("candy")
+        self.assertEqual(m.feeds, 0, "吃饱了还喂进去了")
+
     def test_weekly_report_exports(self):
         app = self._app(no_companion=False)
         app.root.update()

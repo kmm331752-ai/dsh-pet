@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pet_food
+
 import pet_platform
 
 import ctypes
@@ -607,9 +609,18 @@ class Mood:
 
     affection: float = 0.5          # 亲密度 0~1
     energy: float = 1.0             # 精力 0~1
+    # 饱足 0~1。**和精力分开** —— 原来只有 energy 一个值兼着当饥饱，
+    # 于是「喂饱了」和「精神好」变成同一件事，说不通：
+    # 她可以又累又饱，也可以又饿又精神。
+    satiety: float = 0.3
+    # 她自己的口味。开新档时随机挑，之后一直不变 —— 这样她是"这一只"，
+    # 不是每次都一样的通用宠物。
+    favorites: list = field(default_factory=list)
+    dislike: str = ""
     pokes: int = 0                  # 被戳次数
     drags: int = 0                  # 被拖次数
     feeds: int = 0                  # 被喂次数
+    food_counts: dict = field(default_factory=dict)   # 每种吃了多少次
     first_seen: float = 0.0         # 第一次见面
     last_seen: float = 0.0          # 上次运行
     last_tick: float = 0.0          # 上次结算时间（算精力增减用）
@@ -871,6 +882,13 @@ class CompanionSource:
         now = time.time()
         if not mood.first_seen:
             mood.first_seen = now
+        # 口味只在第一次见面时定，之后一直不变 —— 这样她是"这一只"。
+        # 老存档没有这两个字段，补一次（补完就固定了）。
+        if not mood.favorites or not mood.dislike:
+            import random as _r
+            rng = _r.Random(int(mood.first_seen) or 1)
+            mood.favorites = mood.favorites or pet_food.pick_favorites(rng)
+            mood.dislike = mood.dislike or pet_food.pick_dislike(rng, mood.favorites)
         mood.last_seen = now
         mood.last_tick = now
         return mood
@@ -942,11 +960,14 @@ class CompanionSource:
         self.mood.note_activity(time.localtime().tm_hour, busy)
 
     def _settle_energy(self, now: float, dt: float) -> None:
-        """醒着掉精力，睡着回精力。"""
+        """醒着掉精力，睡着回精力。饱足一直慢慢掉。"""
         if self.state == "sleeping":
             self.mood.energy = min(1.0, self.mood.energy + dt * 0.0025)
         elif self.state in ("dozing", "idle", "roaming", "yawning"):
             self.mood.energy = max(0.0, self.mood.energy - dt * 0.00035)
+        # 饱足：睡着也在消化，所以不分状态。约 40 分钟从满掉到空。
+        self.mood.satiety = max(0.0, getattr(self.mood, "satiety", 0.3)
+                                - dt * 0.00042)
         self.mood.last_tick = now
 
     def poll(self) -> Snapshot:
@@ -1088,7 +1109,6 @@ SLEEP_LINES = ["我先眯一会儿", "撑不住了…", "晚安", "困死了"]
 YAWN_LINES = ["啊——欠", "好无聊啊", "你在忙什么", "有点困了"]
 ROAM_LINES = ["溜达一圈", "活动活动", "看看窗外", "嗯…走两步"]
 PET_LINES = ["嘿嘿", "好舒服", "再摸摸", "最喜欢你了"]
-FEED_LINES = ["好吃！", "谢谢投喂", "还有吗", "满足了"]
 ANNOY_LINES = ["别摸了…", "够了够了", "手拿开", "烦不烦"]
 DIZZY_LINES = ["晕…", "别甩了！", "天旋地转", "放我下来"]
 GRAB_LINES = ["喂！", "放开我", "干嘛呀", "别拎着我"]
@@ -1099,6 +1119,10 @@ NIGHT_LINES = ["还不睡？", "该休息了", "夜深了"]
 EDGE_LINES = ["抓到了", "不松手", "救命…"]
 POMO_DONE_LINES = ["时间到！", "该休息了", "这一轮结束了", "起来走两步吧"]
 SIT_LINES = ["坐好久了，起来动动", "腰要断了，站一会儿吧", "别一直坐着啦"]
+# 喂食：吃饱了 / 不爱吃 / 最爱，这三句由 pet_food 的机制触发
+FULL_LINES = pet_food.FULL_LINES
+DISLIKE_LINES = pet_food.DISLIKE_LINES
+FAVORITE_LINES = pet_food.FAVORITE_LINES
 WATER_LINES = ["喝口水吧", "该补水了", "杯子空了吧"]
 
 # ── 台词表 ──────────────────────────────────────────────────────────────────
@@ -1109,12 +1133,26 @@ WATER_LINES = ["喝口水吧", "该补水了", "杯子空了吧"]
 
 _LINE_DEFAULTS = {
     "WAKE_LINES": WAKE_LINES, "SLEEP_LINES": SLEEP_LINES, "YAWN_LINES": YAWN_LINES,
-    "ROAM_LINES": ROAM_LINES, "PET_LINES": PET_LINES, "FEED_LINES": FEED_LINES,
+    "ROAM_LINES": ROAM_LINES, "PET_LINES": PET_LINES,
     "ANNOY_LINES": ANNOY_LINES, "DIZZY_LINES": DIZZY_LINES, "GRAB_LINES": GRAB_LINES,
     "HUNGRY_LINES": HUNGRY_LINES, "LONELY_LINES": LONELY_LINES,
     "MORNING_LINES": MORNING_LINES, "NIGHT_LINES": NIGHT_LINES,
     "EDGE_LINES": EDGE_LINES, "POMO_DONE_LINES": POMO_DONE_LINES,
     "SIT_LINES": SIT_LINES, "WATER_LINES": WATER_LINES,
+    "FULL_LINES": FULL_LINES, "DISLIKE_LINES": DISLIKE_LINES,
+    "FAVORITE_LINES": FAVORITE_LINES,
+    "FOOD_DANGO_LINES": pet_food.FOODS["dango"]["line"],
+    "FOOD_FISH_LINES": pet_food.FOODS["fish"]["line"],
+    "FOOD_RAMEN_LINES": pet_food.FOODS["ramen"]["line"],
+    "FOOD_RICEBALL_LINES": pet_food.FOODS["riceball"]["line"],
+    "FOOD_ONIGIRI_LINES": pet_food.FOODS["onigiri"]["line"],
+    "FOOD_SHORTCAKE_LINES": pet_food.FOODS["shortcake"]["line"],
+    "FOOD_COOKIE_LINES": pet_food.FOODS["cookie"]["line"],
+    "FOOD_CANDY_LINES": pet_food.FOODS["candy"]["line"],
+    "FOOD_CHOCOLATE_LINES": pet_food.FOODS["chocolate"]["line"],
+    "FOOD_BUBBLETEA_LINES": pet_food.FOODS["bubbletea"]["line"],
+    "FOOD_STRAWBERRY_LINES": pet_food.FOODS["strawberry"]["line"],
+    "FOOD_TEACUP_LINES": pet_food.FOODS["teacup"]["line"],
 }
 
 
