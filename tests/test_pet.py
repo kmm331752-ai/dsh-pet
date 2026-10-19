@@ -2552,6 +2552,135 @@ class TestPetdexLive(unittest.TestCase):
             self.assertEqual(p.get("spriteVersionNumber"), 2)
 
 
+class TestSoakVerdict(unittest.TestCase):
+    """长跑的判定逻辑。
+
+    **为什么不跑真的长跑**：那要 40 秒到 40 分钟。判定逻辑本身是纯函数，
+    造样本序列就能测全 —— 而且能造出真跑很难碰到的情形
+    （比如"内存线性涨"）。
+
+    `tools/soak.py` 里 `verdict()` 是纯函数，就为了这个。
+    """
+
+    @staticmethod
+    def _rows(n=12, rss=100.0, objs=30000, threads=2, states=None,
+              **grow):
+        """造一段样本。`grow` 里给每项一个"每个样本涨多少"。"""
+        states = states or ["idle", "roaming", "gazing", "idle", "sleeping"]
+        out = []
+        for i in range(n):
+            r = {"t": i * 600.0, "rss": rss, "objs": objs, "threads": threads,
+                 "state": states[i % len(states)], "history": 0, "seen_slots": 0,
+                 "busy_slots": 0, "sprites": 20, "durations": 15, "tray": 0,
+                 "petdex": 0, "errlog": 0, "moodfile": 100}
+            for k, v in grow.items():
+                r[k] = r.get(k, 0) + v * i
+            out.append(r)
+        return out
+
+    @classmethod
+    def setUpClass(cls):
+        """把 tools/soak.py 当模块加载 —— 但它 import 时就会建临时目录、
+        patch `pet_base.data_dir`。**这正是它设计成脚本的原因**：
+        跑测试时不能让它改真目录，所以只取 `verdict` 那一段的源码来执行。
+        """
+        import types
+        # 仓库根 = 这个测试文件的上上级（没有 repo_root 这种辅助，别现造）
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tools", "soak.py")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        # 只取 verdict 函数体 —— 不执行模块级的副作用
+        start = src.index("def verdict(")
+        end = src.index("def main()")
+        ns = {}
+        exec(compile(src[start:end], "soak-verdict", "exec"), ns)  # noqa: S102
+        cls.verdict = staticmethod(ns["verdict"])
+
+    def test_flat_run_passes(self):
+        """什么都不涨 —— 该过。"""
+        bad, _warn = self.verdict(self._rows())
+        self.assertEqual(bad, [], f"平稳的跑法被误报了：{bad}")
+
+    def test_short_run_does_not_judge(self):
+        """样本太少就别下结论 —— 启动阶段涨是正常的。"""
+        bad, _warn = self.verdict(self._rows(n=3))
+        self.assertEqual(bad, [], "样本不够就报警了")
+
+    def test_memory_leak_is_caught(self):
+        """**这是长跑最主要的目标。**"""
+        rows = self._rows(n=12)
+        for i, r in enumerate(rows):                     # 每个样本 +10MB
+            r["rss"] = 100.0 + i * 10
+        bad, _warn = self.verdict(rows)
+        self.assertTrue(any("内存" in b for b in bad), f"没抓到内存涨：{bad}")
+
+    def test_small_memory_wobble_is_not_a_leak(self):
+        """小幅波动是分配器行为，不该报 —— 报了就是狼来了。"""
+        rows = self._rows(n=12)
+        for i, r in enumerate(rows):
+            r["rss"] = 100.0 + (i % 3) * 4             # 100~108 来回晃
+        bad, _warn = self.verdict(rows)
+        self.assertEqual(bad, [], f"小幅波动被当成泄漏：{bad}")
+
+    def test_object_leak_is_caught(self):
+        rows = self._rows(n=12)
+        for i, r in enumerate(rows):
+            r["objs"] = 30000 + i * 4000
+        bad, _warn = self.verdict(rows)
+        self.assertTrue(any("对象" in b for b in bad), f"没抓到对象涨：{bad}")
+
+    def test_thread_leak_is_caught(self):
+        rows = self._rows(n=12)
+        for i, r in enumerate(rows):
+            r["threads"] = 2 + i
+        bad, _warn = self.verdict(rows)
+        self.assertTrue(any("线程" in b for b in bad), f"没抓到线程涨：{bad}")
+
+    def test_stuck_state_is_caught(self):
+        """她卡在一个状态里出不来 —— 这是**最像 bug 的一种**。
+
+        （真踩过：`wake()` 是一次性的，下一轮状态机又把她哄睡了。）
+        """
+        bad, _warn = self.verdict(self._rows(n=12, states=["idle"]))
+        self.assertTrue(any("停在" in b for b in bad), f"没抓到卡死：{bad}")
+        self.assertTrue(any("状态机没在动" in b for b in bad), str(bad))
+
+    def test_a_few_states_is_enough_to_pass(self):
+        """只要能换状态就行，不要求换很多。"""
+        bad, _warn = self.verdict(self._rows(n=12, states=["idle", "roaming", "gazing"]))
+        self.assertEqual(bad, [], f"三个状态还被判卡死：{bad}")
+
+    def test_unbounded_growth_is_caught(self):
+        for key, label in (("history", "心情历史"), ("seen_slots", "见过的时间段"),
+                           ("sprites", "精灵缓存")):
+            with self.subTest(field=key):
+                rows = self._rows(n=12)
+                for i, r in enumerate(rows):
+                    r[key] = i * 30                  # 涨 330，超过 200 的线
+                bad, _warn = self.verdict(rows)
+                self.assertTrue(any(label in b for b in bad),
+                                f"没抓到 {label} 涨：{bad}")
+
+    def test_error_log_growth_is_caught(self):
+        rows = self._rows(n=12)
+        for i, r in enumerate(rows):
+            r["errlog"] = i * 2000
+        bad, _warn = self.verdict(rows)
+        self.assertTrue(any("错误日志" in b for b in bad), f"没抓到日志涨：{bad}")
+
+    def test_warnings_are_reported_separately(self):
+        """状态分布要报出来（给人看），但不算失败。"""
+        _bad, warn = self.verdict(self._rows())
+        self.assertTrue(any("状态分布" in w for w in warn), str(warn))
+
+    def test_empty_rows_do_not_crash(self):
+        bad, warn = self.verdict([])
+        self.assertEqual(bad, [])
+        self.assertEqual(warn, [])
+
+
 class TestConfig(unittest.TestCase):
     def test_paths_are_absolute(self):
         for p in (B.config_path(), B.mood_path(), B.error_log_path(),
