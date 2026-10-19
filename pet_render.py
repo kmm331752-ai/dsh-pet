@@ -22,6 +22,7 @@ from pet_base import *
 from pet_base import _GLOW_CACHE, _VIEW_CACHE, _gear, _rgba
 
 import pet_i18n
+import pet_mapping
 
 from pet_types import Snapshot, TaskInfo
 
@@ -396,19 +397,18 @@ ATLAS_COLS, ATLAS_ROWS = 8, 9
 ATLAS_CW, ATLAS_CH = 192, 208
 ATLAS_SIZE = (ATLAS_COLS * ATLAS_CW, ATLAS_ROWS * ATLAS_CH)
 
-# 状态 -> 图集行。契约只有 9 行，陪伴模式的状态只能就近借：
-# 溜达借「向右跑」，犯困/打盹借待机，刚醒借挥手（伸懒腰），被摸借跳跃。
-ATLAS_ROW = {"idle": 0, "tools": 7, "thinking": 8, "waiting": 6,
-             "failed": 5, "celebrating": 4, "offline": 0,
-             "roaming": 1, "gazing": 1, "peeking": 0, "yawning": 0, "dozing": 0,
-             "sleeping": 0, "waking": 3, "petted": 4}
-# 行的 (中间帧, 末帧) 毫秒，取自契约的逐帧时长
-ATLAS_TIMING = {
-    0: (120, 320), 1: (110, 200), 3: (140, 280), 4: (140, 280),
-    5: (140, 240), 6: (150, 260), 7: (120, 220), 8: (150, 280),
-}
-# 陪伴模式的状态放慢一点：打盹和睡觉不该跟待机一样精神
-ATLAS_SLOWDOWN = {"yawning": 2.4, "dozing": 3.2, "sleeping": 4.5, "waking": 1.6}
+# 状态 -> 图集行。**这些现在只是默认值** —— 真正的映射在 pet_mapping 里，
+# 皮肤作者可以在 pet.json / theme.json 的 mapping 段覆盖，用户可以在
+# pet_config.json 里再盖一层。
+#
+# 保留这两个模块级名字是因为别处（和测试）还在按老样子读它们。
+# 新代码请用 `skin.mapping`。
+ATLAS_ROW = {state: pet_mapping.DEFAULT_ANIMATIONS[anim]["row"]
+             for state, anim in pet_mapping.DEFAULT_STATE_ANIMATION.items()}
+# 每行的整段时长（毫秒）。契约给的是"这段动画多长"，按帧数均分。
+ATLAS_TIMING = {spec["row"]: spec["duration_ms"]
+                for spec in pet_mapping.DEFAULT_ANIMATIONS.values()}
+ATLAS_SLOWDOWN = dict(pet_mapping.DEFAULT_SLOWDOWN)
 
 
 class DafeiyuSkin:
@@ -477,6 +477,15 @@ class AtlasSkin:
                     break
             except Exception:                            # noqa: BLE001
                 continue
+        # 状态 -> 动画 -> 行号，做成配置了。
+        #
+        # 原来这些写死在模块级的 ATLAS_ROW / ATLAS_TIMING / ATLAS_SLOWDOWN 里，
+        # **皮肤作者改不了**。而 clawd 主题本来就能自己映射（theme.json 的
+        # states 段）—— 两种皮肤格式不对称。
+        #
+        # 行数从图本身数出来，越界的配置会被拒（见 pet_mapping.parse）。
+        self.mapping = pet_mapping.load_from_manifest(
+            self.manifest, max_rows=self.sheet.size[1] // ATLAS_CH)
 
     def _row(self, row: int) -> list:
         if row not in self._rows:
@@ -497,24 +506,33 @@ class AtlasSkin:
         return self._cache[key]
 
     def frames(self, state: str):
-        rows = [3, 4] if state == "celebrating" else [ATLAS_ROW.get(state, 0)]
-        seq = [(r, i) for r in rows for i in range(len(self._row(r)))]
+        """状态 -> 帧序列。行号和时长都来自 mapping（可配置）。"""
+        spec = self.mapping.spec_for(state)
+        row = int(spec["row"])
+        seq = [(row, i) for i in range(len(self._row(row)))]
         if not seq:
             return []
-        mid, last = ATLAS_TIMING.get(rows[-1], (140, 280))
-        slow = ATLAS_SLOWDOWN.get(state, 1.0)
-        return [(self._frame(state, r, i), int((last if k == len(seq) - 1 else mid) * slow))
-                for k, (r, i) in enumerate(seq)]
+        # 整段时长按帧数均分 —— 契约给的是"这段动画多长"，不是逐帧时长。
+        # 这样皮肤作者写 durationMs 就是他要的节奏，不用管我们怎么切帧。
+        total = int(spec.get("duration_ms") or 1000)
+        slow = self.mapping.slow_for(state)
+        per = max(33, int(total / len(seq) * slow))
+        return [(self._frame(state, r, i), per) for (r, i) in seq]
 
     def reaction_frames(self, kind: str) -> list:
         """契约第 3 行是挥手 —— 拿来当「被戳」的反应。"""
         if kind != "poke":
             return []
-        cells = self._row(3)
+        row = self.mapping.animations.get("waving", {}).get("row", 3)
+        cells = self._row(row)
         if not cells:
             return []
-        mid, _last = ATLAS_TIMING.get(3, (140, 280))
-        return [(self._frame("idle", 3, i), mid) for i in range(len(cells))]
+        # 整段时长按帧数均分 —— 和 frames() 一个算法。
+        # （踩过：ATLAS_TIMING 从 `{行: (中帧, 末帧)}` 改成 `{行: 总时长}`
+        # 之后这里还在按老格式解包，反应素材直接加载失败。）
+        total = int(self.mapping.animations.get("waving", {}).get("duration_ms") or 700)
+        per = max(33, int(total / len(cells)))
+        return [(self._frame("idle", row, i), per) for i in range(len(cells))]
 
     # -- 16 方向视线 --------------------------------------------------------
     @property

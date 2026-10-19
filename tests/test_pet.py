@@ -33,6 +33,7 @@ import pet_base as B  # noqa: E402
 import pet_chat as C  # noqa: E402
 import pet_food as FD  # noqa: E402
 import pet_i18n as I  # noqa: E402
+import pet_mapping as MP  # noqa: E402
 import pet_music as MU  # noqa: E402
 import pet_platform as PF  # noqa: E402
 import pet_render as PR  # noqa: E402
@@ -2043,6 +2044,154 @@ class TestActivitySource(unittest.TestCase):
         fields = {f.name for f in dataclasses.fields(S.Mood)}
         for bad in ("title", "window", "activity", "process", "foreground"):
             self.assertNotIn(bad, fields, f"Mood 里不该有 {bad}")
+
+
+class TestMapping(unittest.TestCase):
+    """状态 → 动画的映射，做成配置了。
+
+    原来图集皮肤的行号**写死在 `pet_render.ATLAS_ROW` 里**，皮肤作者改不了。
+    而 clawd 主题本来就能自己映射（`theme.json` 的 `states` 段）——
+    两种皮肤格式不对称。
+
+    设计照 OpenPets 的 `reaction-animation-mapping.ts` 分两层：
+      · **动画定义** —— 名字 → {row, durationMs, loop}
+      · **状态 → 动画** —— {thinking: "review", ...}
+    分开的好处是两件事可以各自改：加动画不动映射，改映射不动动画。
+    """
+
+    def test_defaults_match_the_old_hardcoded_table(self):
+        """默认必须和原来写死的 ATLAS_ROW 一模一样 —— 不能悄悄改了行为。"""
+        want = {"idle": 0, "tools": 7, "thinking": 8, "waiting": 6,
+                "failed": 5, "celebrating": 4, "offline": 0,
+                "roaming": 1, "gazing": 1, "peeking": 0, "yawning": 0,
+                "dozing": 0, "sleeping": 0, "waking": 3, "petted": 4}
+        got = {st: MP.parse(None).row_for(st) for st in want}
+        self.assertEqual(got, want)
+
+    def test_defaults_are_not_marked_as_explicit(self):
+        """默认值不算"显式设过" —— merge 靠这个决定盖什么。"""
+        d = MP.parse(None)
+        self.assertEqual(d.set_states, set())
+        self.assertEqual(d.set_animations, set())
+
+    def test_skin_can_override_states(self):
+        m = MP.parse({"states": {"thinking": "idle"}}, max_rows=11)
+        self.assertEqual(m.row_for("thinking"), 0)
+        self.assertEqual(m.row_for("tools"), 7, "没改的该用默认")
+        self.assertEqual(m.set_states, {"thinking"})
+
+    def test_skin_can_define_animations(self):
+        m = MP.parse({"animations": {"myanim": {"row": 4, "durationMs": 500}},
+                      "states": {"idle": "myanim"}}, max_rows=11)
+        self.assertEqual(m.row_for("idle"), 4)
+        self.assertEqual(m.spec_for("idle")["duration_ms"], 500)
+
+    def test_merge_only_overrides_what_the_user_wrote(self):
+        """**这条是核心。**
+
+        用户只想改"睡觉播什么"的时候，不该把皮肤作者配的另外十几项
+        一起清掉。（第一版 `merge` 拿用户那份"补齐过的完整默认表"
+        整个盖上去，正好反了。）
+        """
+        skin = MP.parse({"states": {"thinking": "idle", "tools": "review"}},
+                        max_rows=11)
+        user = MP.parse({"states": {"sleeping": "failed"}}, max_rows=11)
+        merged = MP.merge(user, skin)
+        self.assertEqual(merged.row_for("sleeping"), 5, "用户的改动没生效")
+        self.assertEqual(merged.row_for("thinking"), 0, "皮肤配的被冲掉了")
+        self.assertEqual(merged.row_for("tools"), 8, "皮肤配的被冲掉了")
+        self.assertEqual(merged.row_for("idle"), 0, "谁都没改的该用默认")
+
+    def test_bad_values_are_dropped_with_a_warning(self):
+        """坏配置**降级 + 记警告**，不抛。
+
+        `pet.json` 是用户会手改的文件（记事本存 BOM 这种事踩过）。
+        一个拼错的行号不该让整个皮肤加载不出来。
+        """
+        m = MP.parse({"states": {"a": "不存在的动画", "b": 123},
+                      "animations": {"c": {"row": "abc"}, "d": "不是对象"}},
+                     max_rows=11)
+        self.assertNotIn("a", m.set_states)
+        self.assertNotIn("b", m.set_states)
+        self.assertNotIn("c", m.set_animations)
+        self.assertNotIn("d", m.set_animations)
+        self.assertEqual(len(m.warnings), 4, str(m.warnings))
+
+    def test_out_of_range_row_is_rejected(self):
+        m = MP.parse({"animations": {"x": {"row": 99}}}, max_rows=11)
+        self.assertNotIn("x", m.set_animations)
+        self.assertTrue(any("超出图集" in w for w in m.warnings), str(m.warnings))
+
+    def test_garbage_input_does_not_raise(self):
+        for raw in (None, "字符串", [], 42, {"states": "x"},
+                    {"animations": []}, {"slowdown": "x"}):
+            with self.subTest(raw=repr(raw)):
+                m = MP.parse(raw, max_rows=11)
+                self.assertEqual(m.row_for("idle"), 0)
+
+    def test_slowdown_is_configurable(self):
+        m = MP.parse({"slowdown": {"sleeping": 9.0}}, max_rows=11)
+        self.assertEqual(m.slow_for("sleeping"), 9.0)
+        self.assertEqual(m.slow_for("idle"), 1.0)
+        self.assertEqual(MP.parse({"slowdown": {"x": -1}}).slow_for("x"), 1.0,
+                         "负数该被拒")
+
+    def test_unknown_state_falls_back_to_idle(self):
+        m = MP.parse(None)
+        self.assertEqual(m.row_for("完全不存在的状态"), 0)
+
+    def test_metadata_is_consistent_with_defaults(self):
+        """元数据是给界面用的 —— 和默认表对不上就会显示错的默认值。"""
+        for item in MP.STATE_META:
+            with self.subTest(state=item["id"]):
+                self.assertEqual(MP.DEFAULT_STATE_ANIMATION.get(item["id"]),
+                                 item["default"])
+        for item in MP.ANIMATION_META:
+            with self.subTest(anim=item["id"]):
+                self.assertIn(item["id"], MP.DEFAULT_ANIMATIONS)
+                self.assertTrue(item["label"] and item["desc"])
+
+    def test_every_pet_state_has_a_mapping(self):
+        """PALETTE 里的每个状态都要有映射 —— 否则会静默回落到 idle。"""
+        for st in P.STATE_ORDER:
+            with self.subTest(state=st):
+                self.assertIn(st, MP.DEFAULT_STATE_ANIMATION,
+                              f"{st} 没有映射，会静默回落到 idle")
+
+
+class TestMappingInSkin(unittest.TestCase):
+    """映射真的接到了皮肤上吗。"""
+
+    def test_default_behaviour_is_unchanged(self):
+        sk = PR.load_skin("openpets")
+        for st, want in (("idle", 0), ("tools", 7), ("thinking", 8),
+                         ("waiting", 6), ("failed", 5), ("celebrating", 4),
+                         ("roaming", 1), ("waking", 3)):
+            with self.subTest(state=st):
+                self.assertEqual(sk.mapping.row_for(st), want)
+
+    def test_frames_use_the_mapping(self):
+        sk = PR.load_skin("openpets")
+        before = len(sk.frames("idle"))
+        sk.mapping.states["idle"] = "failed"          # 改成播 failed 那行
+        after = sk.frames("idle")
+        self.assertEqual(len(after), len(sk._row(5)), "没按映射换行")
+        self.assertNotEqual(len(after), before, "两行帧数一样，这条测不出来")
+
+    def test_reaction_frames_still_work(self):
+        """反应素材要能加载。
+
+        踩过：`ATLAS_TIMING` 从 `{行: (中帧, 末帧)}` 改成 `{行: 总时长}`
+        之后，`reaction_frames` 还在按老格式解包 —— 直接
+        `cannot unpack non-iterable int object`，反应素材全废。
+        """
+        sk = PR.load_skin("openpets")
+        items = sk.reaction_frames("poke")
+        self.assertTrue(items, "取不到反应素材")
+        for img, dur in items:
+            self.assertIsNotNone(img)
+            self.assertIsInstance(dur, int)
+            self.assertGreater(dur, 0)
 
 
 class TestGazeMath(unittest.TestCase):

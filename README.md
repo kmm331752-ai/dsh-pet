@@ -244,6 +244,72 @@ DSH 那边一个活跃会话都没有的时候，她不会傻站着显示「空�
 
 **点角色**仍然是摸她（和点信息卡分开，两件事的意图完全不同）。
 
+## 🎛️ 什么情况播什么，现在是配置
+
+原来图集皮肤的行号**写死在代码里**：
+
+```python
+ATLAS_ROW = {"idle": 0, "tools": 7, "thinking": 8, ...}
+```
+
+皮肤作者改不了。而 **clawd 主题本来就能自己映射**（`theme.json` 里的
+`states` 段）—— 两种皮肤格式**不对称**。现在补上了。
+
+### 两层（照 OpenPets 的分法）
+
+```json
+{
+  "mapping": {
+    "animations": {
+      "idle":    { "row": 0, "durationMs": 5500, "loop": true },
+      "running": { "row": 7, "durationMs": 820 }
+    },
+    "states": {
+      "thinking": "review",
+      "sleeping": "idle",
+      "tools": "running"
+    },
+    "slowdown": { "sleeping": 4.5 }
+  }
+}
+```
+
+| 层 | 管什么 |
+|---|---|
+| `animations` | **动画定义** —— 名字 → 哪一行、多长、循环不循环 |
+| `states` | **状态 → 动画** —— 你的状态该演哪个动画 |
+| `slowdown` | 同一个动画，某些状态播得慢一点（打盹不该跟待机一样精神） |
+
+分开的好处：**加一个动画不用动映射，改一个状态的对应不用动动画定义。**
+
+### 三层优先级
+
+```
+内置默认  <  皮肤清单（pet.json / theme.json）  <  用户配置（pet_config.json）
+```
+
+- **皮肤作者**在 `pet.json` 里决定"这只宠物该怎么演"
+- **用户**在 `pet_config.json` 里写 `mapping` 盖在皮肤之上
+
+**只盖显式写过的键** —— 你只想改"睡觉播什么"的时候，不会把皮肤作者
+配的另外十几项一起清掉。
+
+### 写坏了不会炸
+
+`pet.json` 是手改的文件（记事本存 BOM 这种事踩过）。所以坏配置是
+**降级 + 记警告**，不是抛异常：
+
+- 行号超出图集 → 忽略这一项，用默认
+- 指向不存在的动画 → 忽略，用默认
+- 整段不是对象 → 忽略整段
+
+被忽略的项会打到 stderr，也能从 `mapping_warnings()` 拿到。
+
+### 可选项一览
+
+`animations` 的名字沿用契约的行名（`idle` / `running-right` / `waving` / …），
+认识契约的人一看就懂。`states` 的可用值就是上面那张状态表。
+
 ## 🐾 她也能在 OpenPets 里跑
 
 [**OpenPets**](https://github.com/OpenPetsHQ/openpets)（1305★，**MIT**）是一个

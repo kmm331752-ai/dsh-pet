@@ -31,6 +31,7 @@ from PIL import Image, ImageDraw
 from PIL import ImageTk                              # 皮肤预览要用
 
 import pet_activity
+import pet_mapping
 import pet_music
 import pet_platform
 
@@ -213,6 +214,11 @@ class PetApp:
                 getattr(self.skin, "manifest", None))
         except Exception:                                # noqa: BLE001
             self._gaze_anchor = (0.5, 1.0)
+
+        # 用户层的 mapping 盖在皮肤之上：
+        #   内置默认 < 皮肤清单 < pet_config.json
+        # 皮肤作者决定"这只宠物该怎么演"，用户决定"我要它怎么演"。
+        self._apply_user_mapping()
         self._build_sprites()
         self._bind_events()
         self._start_tray()
@@ -246,6 +252,10 @@ class PetApp:
         cfg["focus"] = self.focus_mode
         cfg["autohide"] = self._autohide
         cfg["companion"] = self.companion is not None
+        # mapping 也要显式写。`cfg = dict(self.cfg)` 其实已经把它带上了，
+        # 但有一条测试专门查"读了但从不写回的键"—— 因为那种键最容易
+        # 变成"改了重启就丢"。显式写出来也顺便当文档。
+        cfg["mapping"] = self.cfg.get("mapping") or {}
         try:
             with open(config_path(), "w", encoding="utf-8") as fh:
                 json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -1793,6 +1803,40 @@ class PetApp:
                 self.root.geometry(f"+{x}+{y}")
                 self._say(say_line("EDGE_LINES"), 2.4)
         self._save_config()
+
+    def _apply_user_mapping(self) -> None:
+        """把 pet_config.json 里的 `mapping` 盖到皮肤的映射上。
+
+        **只盖用户显式写过的键**（`pet_mapping.merge` 靠 set_* 判断）——
+        整段替换的话，用户只想改"睡觉播什么"，皮肤作者配的另外十几项
+        会被一起清掉。
+        """
+        skin = getattr(self, "skin", None)
+        if skin is None or not hasattr(skin, "mapping"):
+            return
+        raw = self.cfg.get("mapping")
+        if not isinstance(raw, dict) or not raw:
+            return
+        try:
+            rows = skin.sheet.size[1] // pet_render.ATLAS_CH
+        except Exception:                                # noqa: BLE001
+            rows = None
+        user = pet_mapping.parse(raw, max_rows=rows)
+        skin.mapping = pet_mapping.merge(user, skin.mapping)
+        # 不用 log_error —— 它要一个真异常（内部 `type(exc).__traceback__`），
+        # 传 None 进去等于什么都没记。这里是**配置警告**不是异常，
+        # 存下来给设置窗口显示，同时打到 stderr。
+        self._mapping_warnings = list(skin.mapping.warnings)
+        for w in self._mapping_warnings:
+            print(f"[mapping] {w}", file=sys.stderr)
+
+    def mapping_warnings(self) -> list:
+        """皮肤 + 用户配置里所有被忽略的项。设置窗口用它提示。"""
+        skin = getattr(self, "skin", None)
+        got = list(getattr(self, "_mapping_warnings", ()) or ())
+        if not got:
+            got = list(getattr(getattr(skin, "mapping", None), "warnings", ()) or ())
+        return got
 
     # -- 音乐控制 -----------------------------------------------------------
     def _music_ready(self) -> bool:
