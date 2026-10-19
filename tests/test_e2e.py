@@ -83,6 +83,15 @@ class E2EBase(unittest.TestCase):
         with open(B.config_path(), "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False)
 
+    def read_config(self) -> dict:
+        """读回 pet_config.json —— 端到端测试的**输出**在这里。
+
+        设置界面改的东西最后都落到这个文件上，所以"用户改了之后存下来了
+        吗"要从这里断言，不是从内存里的 `app.cfg`。
+        """
+        with open(B.config_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+
     def write_config_bom(self, **kw) -> None:
         """带 BOM 地写 —— 模拟记事本存 UTF-8。"""
         import io as _io
@@ -1272,6 +1281,189 @@ class TestGazeEndToEnd(E2EBase):
         app = self._app()
         self.assertEqual(app._gaze_anchor, (0.5, 0.32),
                          "没从 pet.json 读到 gazeAnchor")
+
+
+class TestMappingWindow(E2EBase):
+    """映射编辑界面 —— **从设置窗口那个按钮进，断言配置和皮肤状态**。
+
+    规则 1 说"测路径不测零件"：所以这里不直接调 `_open_mapping_window()`，
+    而是先找到设置窗口上那个按钮 `invoke()` 它 —— 用户就是这么进来的。
+    """
+
+    def _open_via_settings(self, app):
+        """走用户那条路：设置窗口 → 点按钮 → 映射窗口。"""
+        app._open_settings()
+        app.root.update()
+        sw = app._settings_win
+        self.assertIsNotNone(sw, "设置窗口没建起来")
+        hits = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                try:
+                    if c.cget("text") and "映射" in str(c.cget("text")):
+                        hits.append(c)
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(sw)
+        self.assertTrue(hits, "设置窗口里没有「动画映射」按钮")
+        hits[0].invoke()
+        app.root.update()
+        return app._mapping_win
+
+    @staticmethod
+    def _buttons(win):
+        out = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                try:
+                    if c.winfo_class() == "Button":
+                        out.append((str(c.cget("text")), c))
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(win)
+        return out
+
+    def _set_state(self, win, want_from, to):
+        """把当前值是 `want_from` 的那个下拉框改成 `to`。返回改了几个。"""
+        n = 0
+
+        def walk(w):
+            nonlocal n
+            for c in w.winfo_children():
+                try:
+                    if c.winfo_class() == "Menubutton":
+                        vn = str(c.cget("textvariable"))
+                        if vn and win.getvar(vn) == want_from:
+                            win.setvar(vn, to)
+                            n += 1
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(win)
+        return n
+
+    def test_the_button_opens_the_window(self):
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        self.assertIsNotNone(win, "点了按钮窗口没建起来")
+        texts = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                try:
+                    if c.cget("text"):
+                        texts.append(str(c.cget("text")))
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(win)
+        self.assertTrue(any("思考中" in x for x in texts), "没列出状态")
+        self.assertTrue(any("openpets" in x for x in texts), "没显示皮肤名")
+
+    def test_saving_a_change_reaches_the_skin_and_the_config(self):
+        """**这条是核心。** 改一项 → 保存 → 皮肤变了 + 配置写对了。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        self.assertEqual(app.skin.mapping.row_for("thinking"), 8, "基线不对")
+        win = self._open_via_settings(app)
+
+        self.assertEqual(self._set_state(win, "review", "idle"), 1,
+                         "没找到 thinking 那个下拉框")
+        save = dict(self._buttons(win)).get("保存")
+        self.assertIsNotNone(save, "没有保存按钮")
+        save.invoke()
+        app.root.update()
+
+        self.assertEqual(app.skin.mapping.row_for("thinking"), 0, "皮肤没跟着变")
+        self.assertEqual(app.skin.mapping.row_for("tools"), 7, "没碰的被改了")
+        cfg = self.read_config()
+        self.assertEqual(cfg.get("mapping", {}).get("states"), {"thinking": "idle"},
+                         "配置写错了")
+
+    def test_only_changed_states_are_stored(self):
+        """只存改过的 —— 15 个状态全写进配置的话，以后改默认值就传不下去了。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        self._set_state(win, "review", "idle")
+        dict(self._buttons(win))["保存"].invoke()
+        app.root.update()
+        states = self.read_config().get("mapping", {}).get("states", {})
+        self.assertEqual(set(states), {"thinking"}, f"存多了：{set(states)}")
+
+    def test_change_survives_a_restart(self):
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        self._set_state(win, "review", "idle")
+        dict(self._buttons(win))["保存"].invoke()
+        app.root.update()
+
+        app2 = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        self.assertEqual(app2.skin.mapping.row_for("thinking"), 0, "重启就丢了")
+        self.assertEqual(app2.skin.mapping.row_for("tools"), 7)
+
+    def test_restore_defaults_really_restores(self):
+        """「恢复默认」要回得去。
+
+        踩过：如果保存时只改 `skin.mapping.states`，那"恢复默认"就没有
+        干净的起点可比 —— 必须在保存时从皮肤的**原始清单**重新解析。
+        """
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        self._set_state(win, "review", "idle")
+        dict(self._buttons(win))["保存"].invoke()
+        app.root.update()
+        self.assertEqual(app.skin.mapping.row_for("thinking"), 0)
+
+        app._open_mapping_window()                       # 重开一个（旧的已经关了）
+        app.root.update()
+        win2 = app._mapping_win
+        self.assertIsNotNone(win2)
+        btns = dict(self._buttons(win2))
+        btns["恢复默认"].invoke()
+        app.root.update()
+        btns["保存"].invoke()
+        app.root.update()
+        self.assertEqual(app.skin.mapping.row_for("thinking"), 8, "没恢复回去")
+        self.assertNotIn("states", self.read_config().get("mapping") or {},
+                         "配置里还留着 states")
+
+    def test_builtin_skin_explains_instead_of_crashing(self):
+        """内置皮肤没有可配置的行 —— 要给说明，不是报错。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="dafeiyu")
+        shown = []
+        app.messagebox = type("M", (), {"showinfo": staticmethod(
+            lambda *a, **k: shown.append(a))})()
+        app._open_mapping_window()
+        app.root.update()
+        self.assertEqual(len(shown), 1, "没给说明")
+        self.assertIsNone(app._mapping_win, "不该建窗口")
+
+    def test_bad_config_shows_a_warning(self):
+        """被忽略的配置项要在界面上看得见。"""
+        self.write_config(mapping={"states": {"thinking": "不存在的动画"}})
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        self.assertTrue(app.mapping_warnings(), "没记下警告")
+        win = self._open_via_settings(app)
+        texts = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                try:
+                    if c.cget("text"):
+                        texts.append(str(c.cget("text")))
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(win)
+        self.assertTrue(any("忽略" in x for x in texts), f"界面没提示：{texts[-6:]}")
 
 
 if __name__ == "__main__":

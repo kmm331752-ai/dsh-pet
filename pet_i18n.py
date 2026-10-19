@@ -97,6 +97,35 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
+    "动画映射":
+        "Animation mapping",
+    "什么情况播什么":
+        "Which animation plays when",
+    "皮肤：":
+        "Skin: ",
+    "改了立刻生效，存在 pet_config.json 里。":
+        "Takes effect immediately; saved in pet_config.json.",
+    "播哪个动画":
+        "Animation",
+    "说明":
+        "Notes",
+    "已改":
+        "edited",
+    "有配置被忽略了：":
+        "Some settings were ignored: ",
+    "已保存":
+        "Saved",
+    "已恢复默认（还要点保存）":
+        "Restored defaults (click Save to apply)",
+    "恢复默认":
+        "Restore defaults",
+    "这个皮肤没有可配置的动画":
+        "This skin has no configurable animations",
+    "只有精灵图（图集）皮肤能改。clawd 主题的映射写在它自己的 theme.json 里，内置皮肤是程序化画的。":
+        "Only spritesheet (atlas) skins can be edited. clawd themes map states in their own theme.json, and the built-in skin is drawn procedurally.",
+    "动画映射（什么情况播什么）…":
+        "Animation mapping…",
+
     # ── 右键菜单 ──
     "显示 / 隐藏": "Show / Hide",
     "展开详情": "Expand details",

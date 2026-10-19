@@ -78,7 +78,9 @@ def _short_name(name: str, limit: int = 16) -> str:
 class PetApp:
     def __init__(self, args):
         import tkinter as tk
+        from tkinter import messagebox
         self.tk = tk
+        self.messagebox = messagebox
         self.args = args
         self.cfg = self._load_config()
 
@@ -196,6 +198,7 @@ class PetApp:
         # 统一在 __init__ 里建出来，不要"用到才建"：那样某个功能会安静地不工作
         # （_drop_job 就是这么坑掉「等待提醒」的）。
         self._settings_win = None
+        self._mapping_win = None
         self._chat_win = None
         self._sess_win = None
         self._preview_win = None
@@ -739,6 +742,10 @@ class PetApp:
         tk.Button(btns, text=t("重置相处记录"), command=forget_me).pack(side="left", padx=6)
         tk.Button(btns, text=t("出错日志"), command=self._show_error_log).pack(side="left")
         row += 1
+        tk.Button(win, text=t("动画映射（什么情况播什么）…"),
+                  command=self._open_mapping_window).grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 6))
+        row += 1
 
         status = tk.Label(win, text="", fg="#666")
         status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
@@ -1017,6 +1024,143 @@ class PetApp:
         except Exception as exc:                         # noqa: BLE001
             log_error(f"生成皮肤缩略图失败：{skin_id}", exc)
             return None
+
+    def _open_mapping_window(self) -> None:
+        """「什么情况播什么」的编辑界面。
+
+        只对**图集皮肤**有意义 —— clawd 主题的映射写在它自己的
+        `theme.json` 里（states 段，值是文件名），不走这套。内置的大肥鱼
+        是程序化画的，也没有可配置的行。两种情况下给一句说明，不是报错。
+        """
+        tk = self.tk
+        if getattr(self, "_mapping_win", None) is not None:
+            try:
+                self._mapping_win.deiconify()
+                self._mapping_win.lift()
+                return
+            except Exception:                            # noqa: BLE001
+                self._mapping_win = None
+
+        skin = getattr(self, "skin", None)
+        if not hasattr(skin, "mapping"):
+            self.messagebox.showinfo(
+                t("这个皮肤没有可配置的动画"),
+                t("只有精灵图（图集）皮肤能改。clawd 主题的映射写在它自己的 "
+                  "theme.json 里，内置皮肤是程序化画的。"))
+            return
+
+        win = tk.Toplevel(self.root)
+        self._mapping_win = win
+        win.title(t("动画映射"))
+        win.attributes("-topmost", True)
+
+        head = tk.Frame(win)
+        head.pack(fill="x", padx=14, pady=(12, 4))
+        tk.Label(head, text=t("什么情况播什么"), font=("Microsoft YaHei UI", 11, "bold")
+                 ).pack(anchor="w")
+        tk.Label(head, text=t("皮肤：") + skin.display, fg="#777").pack(anchor="w")
+        tk.Label(head, text=t("改了立刻生效，存在 pet_config.json 里。"),
+                 fg="#777").pack(anchor="w")
+
+        body = tk.Frame(win)
+        body.pack(fill="both", expand=True, padx=14, pady=8)
+        tk.Label(body, text=t("状态"), width=10, anchor="w",
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(body, text=t("播哪个动画"), width=12, anchor="w",
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=1, sticky="w")
+        tk.Label(body, text=t("说明"), anchor="w",
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=2, sticky="w")
+
+        anim_ids = [a["id"] for a in pet_mapping.animation_choices()]
+        anim_desc = {a["id"]: a["desc"] for a in pet_mapping.animation_choices()}
+        anim_label = {a["id"]: a["label"] for a in pet_mapping.animation_choices()}
+
+        # 当前值 = 皮肤 + 用户配置合并之后的
+        cur = {s["id"]: skin.mapping.states.get(s["id"], "idle")
+               for s in pet_mapping.state_choices()}
+        # 记下**出厂默认**，用来显示"改过没有"
+        builtin = dict(pet_mapping.DEFAULT_STATE_ANIMATION)
+
+        vars_map: dict = {}
+        desc_labels: dict = {}
+        changed_labels: dict = {}
+
+        def refresh_desc(state: str):
+            """改了下拉框就更新右边那列说明。"""
+            a = vars_map[state].get()
+            desc_labels[state].configure(text=anim_desc.get(a, ""))
+            same = builtin.get(state) == a
+            changed_labels[state].configure(
+                text="" if same else t("已改"),
+                fg="#C77B2E" if not same else "#777")
+
+        for i, s in enumerate(pet_mapping.state_choices(), start=1):
+            sid = s["id"]
+            tk.Label(body, text=s["label"], anchor="w").grid(
+                row=i, column=0, sticky="w", pady=2)
+            v = tk.StringVar(value=cur.get(sid, "idle"))
+            vars_map[sid] = v
+            # 下拉框显示中文 label，但值还是动画 id
+            om = tk.OptionMenu(body, v, *anim_ids,
+                               command=lambda _a, st=sid: refresh_desc(st))
+            om.configure(width=10)
+            om.grid(row=i, column=1, sticky="w", padx=(0, 8))
+            dl = tk.Label(body, text="", anchor="w", fg="#666", width=22)
+            dl.grid(row=i, column=2, sticky="w")
+            desc_labels[sid] = dl
+            cl = tk.Label(body, text="", anchor="w", fg="#777", width=5)
+            cl.grid(row=i, column=3, sticky="w")
+            changed_labels[sid] = cl
+            refresh_desc(sid)
+
+        warn = self.mapping_warnings()
+        if warn:
+            tk.Label(win, text="⚠ " + t("有配置被忽略了：") + "；".join(warn[:3]),
+                     fg="#B93B37", wraplength=420, justify="left").pack(
+                anchor="w", padx=14)
+
+        status = tk.Label(win, text="", fg="#666")
+        status.pack(anchor="w", padx=14, pady=(4, 0))
+
+        def apply_and_close():
+            """写进 pet_config.json 并立刻生效。"""
+            states = {sid: v.get() for sid, v in vars_map.items()
+                      if v.get() != builtin.get(sid)}      # 只存改过的
+            cfg = dict(self.cfg.get("mapping") or {})
+            if states:
+                cfg["states"] = states
+            else:
+                cfg.pop("states", None)
+            if cfg:
+                self.cfg["mapping"] = cfg
+            else:
+                self.cfg.pop("mapping", None)
+            # 重新套一遍：从皮肤的原始映射开始，再盖用户配置。
+            # 不能只改 skin.mapping.states —— 那样"恢复默认"就回不去了。
+            self.skin.mapping = pet_mapping.load_from_manifest(
+                getattr(self.skin, "manifest", None),
+                max_rows=self.skin.sheet.size[1] // pet_render.ATLAS_CH)
+            self._apply_user_mapping()
+            self._save_config()
+            self._ensure_state(self.snap.state)
+            status.configure(text=t("已保存"), fg="#2E9E63")
+            win.after(400, close)
+
+        def restore_defaults():
+            for sid, v in vars_map.items():
+                v.set(builtin.get(sid, "idle"))
+                refresh_desc(sid)
+            status.configure(text=t("已恢复默认（还要点保存）"), fg="#C77B2E")
+
+        def close():
+            win.destroy()
+            self._mapping_win = None
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=14, pady=(4, 12))
+        tk.Button(bar, text=t("保存"), width=10, command=apply_and_close).pack(side="left")
+        tk.Button(bar, text=t("恢复默认"), command=restore_defaults).pack(side="left", padx=6)
+        tk.Button(bar, text=t("关闭"), width=8, command=close).pack(side="left")
 
     def _open_skin_preview(self) -> None:
         """所有皮肤排一排，点一下直接切 —— 不用一个个试。"""
