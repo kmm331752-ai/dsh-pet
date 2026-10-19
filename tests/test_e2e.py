@@ -1063,8 +1063,13 @@ class TestWorksWithoutDSH(E2EBase):
             app = self.make_app(force_state=None, no_companion=False)
             self.assertEqual(app.watcher.poll().state, "offline")
 
+            # idle_seconds 也要钉死（规则 6）—— CI runner 上没人动键鼠，
+            # 真实 idle 很大，她会一直睡（实测：只看到 ['sleeping']）。
+            # 两处都要 patch：dsh_pet 里是 `from pet_sources import *`。
             with mock.patch.object(S.time, "time", tick_time), \
                  mock.patch.object(P.time, "time", tick_time), \
+                 mock.patch.object(S, "idle_seconds", lambda: 1.0), \
+                 mock.patch.object(P, "idle_seconds", lambda: 1.0), \
                  mock.patch.object(P, "cursor_pos", lambda: (99999, 99999)):
                 app._poll()
                 self.assertTrue(app.in_companion, f"state={app.snap.state}")
@@ -1099,7 +1104,10 @@ class TestWorksWithoutDSH(E2EBase):
             app = self.make_app(force_state=None, no_companion=False)
             fm = FakeMusic(fake_track("歌", "人"))
             app.music, app.companion.music = fm, fm
-            app._poll()
+            # idle 钉死：CI 上没人动键鼠，她会睡，装饰就是 zzz 不是 music
+            with mock.patch.object(S, "idle_seconds", lambda: 1.0), \
+                 mock.patch.object(P, "idle_seconds", lambda: 1.0):
+                app._poll()
             self.assertEqual(app.snap.music, "人 - 歌")
             self.assertEqual(app._overlay_kind(time.time()), "music")
             app._music_cmd("toggle")

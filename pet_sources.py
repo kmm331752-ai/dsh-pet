@@ -907,6 +907,11 @@ class CompanionSource:
             snap.detail_line = self.bubble
             snap.bubble = True
 
+    def _music_playing(self) -> bool:
+        """现在有人在放歌吗。**便宜**：读的是缓存，不发请求。"""
+        np = self.now_playing
+        return bool(np is not None and np.is_music and np.playing)
+
     def wake(self) -> None:
         """把她叫醒。DSH 开工、或有人在放歌时用。"""
         if self.state in ("sleeping", "dozing"):
@@ -920,7 +925,7 @@ class CompanionSource:
         · 一直在放 → 不冒泡，但让她挂着 music 装饰（在 PetApp 那边画）
         """
         np = self.now_playing
-        if np is None or not np.is_music or not np.playing:
+        if not self._music_playing():
             self._music_seen = ""
             self._music_since = 0.0
             return
@@ -1150,7 +1155,12 @@ class CompanionSource:
                 self.wander_target = 0.0                     # 停下就别再挪窗口
             elif self.state == "idle":
                 sleep_after = NIGHT_IDLE_SLEEP if (night or tired) else IDLE_SLEEP
-                if idle > sleep_after or (tired and idle > 20):
+                # **有人在放歌 = 有人在。** 写在状态机自己的条件里，不是靠
+                # _music_tick 里一次性 wake() —— 那样下一轮又会被哄睡
+                # （CI 上报的：'zzz' != 'music'）。
+                if self._music_playing():
+                    pass                                 # 不睡，走下面的分支
+                elif idle > sleep_after or (tired and idle > 20):
                     self._enter("sleeping")
                     if random.random() < 0.3:
                         self.say(say_line("SLEEP_LINES"))
