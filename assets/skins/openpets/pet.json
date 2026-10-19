@@ -1,0 +1,11 @@
+{
+  "id": "dafeiyu",
+  "displayName": "大肥鱼",
+  "description": "一条会陪着你干活的胖鱼。她显示 DSH 任务状态，会跟着你听的歌晃，你在开会时会安静待着。",
+  "spritesheetPath": "spritesheet.webp",
+  "category": "companion",
+  "subcategory": "developer",
+  "sourceUrl": "https://github.com/kmm331752-ai/dsh-pet",
+  "spriteVersionNumber": 2,
+  "gazeAnchor": { "x": 0.5, "y": 0.32 }
+}

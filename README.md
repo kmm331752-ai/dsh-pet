@@ -253,14 +253,22 @@ DSH 那边一个活跃会话都没有的时候，她不会傻站着显示「空�
 同一个：`spritesheet.webp` + 可选 `theme.json`。
 
 ```
-assets/skins/openpets/spritesheet.webp     ← 2.1 MB
+assets/skins/openpets/
+  ├─ pet.json            ← OpenPets 的包清单（必填，少了导不进去）
+  └─ spritesheet.webp    ← 1536×2288 = 8 列 × 11 行，每帧 192×208（V2 契约）
 ```
+
+> **补这个 `pet.json` 之前，「作为分发渠道保留」这句话其实是空的** ——
+> 目录里只有 `spritesheet.webp`，而 OpenPets 要清单才认。
+> 现在有测试守着这四个必填字段、图集尺寸和 `gazeAnchor` 的合法性。
 
 ### 怎么用
 
 1. 装 [OpenPets Desktop](https://github.com/OpenPetsHQ/openpets/releases)
-2. 把 `assets/skins/openpets/` 整个目录作为皮肤导入
+2. 把 `assets/skins/openpets/` 整个目录作为宠物包导入
 3. 她就在 OpenPets 里跑了
+
+（本项目自己也能加载同一个目录 —— 两条路共用一份图集。）
 
 ### 为什么要留这条
 

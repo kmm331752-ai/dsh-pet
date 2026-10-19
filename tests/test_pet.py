@@ -35,6 +35,8 @@ import pet_food as FD  # noqa: E402
 import pet_i18n as I  # noqa: E402
 import pet_music as MU  # noqa: E402
 import pet_platform as PF  # noqa: E402
+import pet_render as PR  # noqa: E402
+import pet_skin_install as SI  # noqa: E402
 import pet_sources as S  # noqa: E402
 
 
@@ -2041,6 +2043,89 @@ class TestActivitySource(unittest.TestCase):
         fields = {f.name for f in dataclasses.fields(S.Mood)}
         for bad in ("title", "window", "activity", "process", "foreground"):
             self.assertNotIn(bad, fields, f"Mood 里不该有 {bad}")
+
+
+class TestOpenPetsPackage(unittest.TestCase):
+    """OpenPets 宠物包契约。
+
+    **为什么值得测**：`assets/skins/openpets/` 是我们的**分发渠道之一** ——
+    用户可以直接把它导进 [OpenPets](https://github.com/OpenPetsHQ/openpets)。
+    但 OpenPets 要 `pet.json` 清单，光有 spritesheet **导不进去**。
+
+    实测过：补 manifest 之前那个目录只有 `spritesheet.webp`，
+    "作为分发渠道保留"这句话其实**是空的**。
+
+    契约来自 OpenPets 的 `docs/pets.md`：
+      · 必填 id / displayName / description / spritesheetPath
+      · 帧 192x208，V2 图集是 1536x2288（8 列 x 11 行）
+      · gazeAnchor 是 [0,1] 的归一化坐标
+    """
+
+    DIR = os.path.join(B.assets_dir(), "skins", "openpets")
+
+    def _manifest(self):
+        import json
+        path = os.path.join(self.DIR, "pet.json")
+        self.assertTrue(os.path.exists(path),
+                        "没有 pet.json —— OpenPets 导不进去")
+        with open(path, encoding="utf-8-sig") as fh:
+            return json.load(fh)
+
+    def test_has_the_required_fields(self):
+        m = self._manifest()
+        for key in ("id", "displayName", "description", "spritesheetPath"):
+            with self.subTest(field=key):
+                self.assertIn(key, m, f"OpenPets 必填字段缺了 {key}")
+                self.assertTrue(str(m[key]).strip(), f"{key} 是空的")
+
+    def test_spritesheet_path_resolves(self):
+        m = self._manifest()
+        path = os.path.join(self.DIR, m["spritesheetPath"])
+        self.assertTrue(os.path.exists(path),
+                        f"spritesheetPath 指向 {m['spritesheetPath']}，但文件不在")
+
+    def test_spritesheet_is_the_v2_contract(self):
+        """1536x2288 = 8 列 x 11 行，每帧 192x208。"""
+        from PIL import Image
+        m = self._manifest()
+        W, H = Image.open(os.path.join(self.DIR, m["spritesheetPath"])).size
+        self.assertEqual((W, H), (1536, 2288),
+                         f"图集是 {W}x{H}，OpenPets 的 V2 契约要 1536x2288")
+        self.assertEqual(W // 192, 8, "不是 8 列")
+        self.assertEqual(H // 208, 11, "不是 11 行")
+
+    def test_gaze_anchor_is_normalized(self):
+        ga = self._manifest().get("gazeAnchor")
+        if ga is None:
+            self.skipTest("gazeAnchor 是可选的")
+        for axis in ("x", "y"):
+            with self.subTest(axis=axis):
+                self.assertIn(axis, ga)
+                self.assertGreaterEqual(ga[axis], 0.0)
+                self.assertLessEqual(ga[axis], 1.0)
+
+    def test_we_can_still_load_it_ourselves(self):
+        """加了 pet.json 之后，本项目自己也得照样认这个皮肤。"""
+        sk = PR.load_skin("openpets")
+        self.assertTrue(sk.frames("idle"), "本项目加载不出帧了")
+
+    def test_a_bare_openpets_package_is_discoverable(self):
+        """用户直接把 OpenPets 的宠物包丢进 skins/ 也要能认出来。
+
+        **不需要 pet.json 当识别标记**：OpenPets 的包里必然有
+        `spritesheet.webp`（`pet.json.spritesheetPath` 是必填的），
+        而它早就是识别标记了。单独一个 pet.json 不构成皮肤。
+
+        第一版把 pet.json 也加进了 SKIN_MARKERS —— 多余的，
+        而且和 `discover_skins` 不一致，被
+        `test_markers_match_what_discover_recognizes` 抓到。
+        """
+        ids = {s["id"] for s in PR.discover_skins()}
+        self.assertIn("openpets", ids, "OpenPets 的包没被发现")
+        # 这个包确实同时有 manifest 和图集
+        self.assertTrue(os.path.exists(os.path.join(self.DIR, "pet.json")))
+        self.assertTrue(any(os.path.exists(os.path.join(self.DIR, n))
+                            for n in ("spritesheet.webp", "spritesheet.png")))
 
 
 class TestConfig(unittest.TestCase):
