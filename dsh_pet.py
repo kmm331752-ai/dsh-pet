@@ -1530,7 +1530,9 @@ class PetApp:
         self.pomo_until = 0.0
         self._play_sound("pomo")
         if self.companion is not None:
-            self.companion.say(say_line("POMO_DONE_LINES"), 6.0)
+            # 番茄钟到点是"该提醒的"，quiet 压不住
+            self.companion.say(say_line("POMO_DONE_LINES"), 6.0,
+                                important=True)
 
     def _play_sound(self, event: str = "done") -> None:
         """响一声。
@@ -2001,9 +2003,12 @@ class PetApp:
                 # 你在开会/写代码/看视频 → 她闭嘴（但状态和装饰照常）。
                 # 这是"知道你在干什么"的意义：之前她只能按空闲时间猜。
                 if getattr(self.snap, "quiet", False):
-                    self.snap.bubble = False
-                    if self.companion is not None:
-                        self.companion.bubble_until = 0.0
+                    # quiet = "别闲聊"，不是"闭嘴" —— 重要的话（久坐提醒、
+                    # 番茄钟）还是要说。第一版一刀切，把久坐提醒也压没了。
+                    if not getattr(self.companion, "bubble_important", False):
+                        self.snap.bubble = False
+                        if self.companion is not None:
+                            self.companion.bubble_until = 0.0
                 if self.snap.state == "waiting" and not self.focus_mode:
                     self._attention()                        # 卡在你这儿就走到屏幕中间
                 # 溜达：把窗口朝目标位置挪一点。拖动中不抢方向盘。

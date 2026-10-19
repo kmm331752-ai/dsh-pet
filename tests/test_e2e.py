@@ -849,6 +849,49 @@ class TestMusicAndActivity(E2EBase):
         self.assertTrue(app.snap.quiet, "DSH 忙的时候也该安静")
         self.assertEqual(app.snap.state, "tools", "状态不该被改掉")
 
+    def test_health_reminder_survives_quiet(self):
+        """**CI 抓到的回归测试。**
+
+        quiet（开会/写代码时别打扰）第一版压掉了**所有**气泡，
+        包括久坐提醒 —— CI 上直接挂了已有的
+        `test_fires_while_dsh_is_busy`。
+
+        语义应该是「别闲聊」，不是「闭嘴」：开会时不该说"这首好听"，
+        但**该提醒你起来动动**。
+        """
+        app, _, _ = self._app_with(
+            None, AC.Activity(process="Code.exe", category="coding"))
+        app._poll()
+        self.assertTrue(app.snap.quiet, "先确认真的进了 quiet")
+
+        # 造一个"久坐到点"
+        app.companion.sitting_since = time.time() - 99999
+        app.companion.next_health = 0.0
+        app.companion.bubble_until = 0.0
+        with mock.patch.object(S, "idle_seconds", lambda: 1.0):
+            app._poll()
+            app.root.update()
+        self.assertTrue(app.companion.bubble, "久坐提醒被 quiet 压没了")
+        self.assertTrue(app.companion.bubble_important, "久坐提醒该标 important")
+        self.assertTrue(app.snap.bubble, "气泡没贴到 snapshot 上")
+        self.assertTrue(app.snap.quiet, "quiet 标记本身还在")
+
+    def test_music_wakes_her_up(self):
+        """放歌说明有人在 —— 她不该睡着。
+
+        CI 抓到的：测试期望装饰是 music，拿到 zzz（她睡了，
+        而 sleeping 的检查在 music 之前）。
+        """
+        app, _, _ = self._app_with(fake_track("歌", "人"))
+        app.companion.state = "sleeping"
+        app.companion.state_until = time.time() + 999
+        with mock.patch.object(S, "idle_seconds", lambda: 9999.0):
+            for _ in range(5):
+                app._poll()
+                app.root.update()
+        self.assertNotEqual(app.snap.state, "sleeping", "放歌时她睡着了")
+        self.assertNotEqual(app._overlay_kind(time.time()), "zzz")
+
     def test_quiet_survives_a_real_poll_cycle(self):
         """走完整 _poll（含 watcher 分支），确认 quiet 没被冲掉。"""
         app, _, _ = self._app_with(

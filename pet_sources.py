@@ -850,6 +850,7 @@ class CompanionSource:
         self._quiet_until = 0.0         # 到这个时刻之前不冒泡
         self._quiet_kind = ""           # 为什么安静（meeting / coding）
         self._stuck_said = 0.0          # 上次提醒"同一个应用待太久"的时刻
+        self.bubble_important = False   # 这句话重不重要（重要的话 quiet 压不住）
 
     # -- 数据源 -------------------------------------------------------------
     def attach_sources(self, music=None, activity=None) -> None:
@@ -891,7 +892,9 @@ class CompanionSource:
 
         poll() 自己产出的 snapshot 也走这里 —— 一处逻辑，两条分支共用。
         """
-        if now < self._quiet_until:
+        # quiet = "别闲聊"，不是"闭嘴"。重要的话（久坐提醒、番茄钟）
+        # 照样说出来 —— 否则开会时她连"起来动动"都不提醒了。
+        if now < self._quiet_until and not self.bubble_important:
             snap.quiet = True
 
         np = self.now_playing
@@ -903,6 +906,11 @@ class CompanionSource:
         if now < self.bubble_until and self.bubble:
             snap.detail_line = self.bubble
             snap.bubble = True
+
+    def wake(self) -> None:
+        """把她叫醒。DSH 开工、或有人在放歌时用。"""
+        if self.state in ("sleeping", "dozing"):
+            self._enter("waking", 2.6)
 
     def _music_tick(self, now: float) -> None:
         """跟着音乐做反应。
@@ -916,6 +924,10 @@ class CompanionSource:
             self._music_seen = ""
             self._music_since = 0.0
             return
+
+        # 有人在放歌 = 有人在。别睡了 —— 而且睡着的 zzz 装饰会盖住音符
+        # （CI 上抓到的：测试期望 music，拿到 zzz）。
+        self.wake()
 
         key = f"{np.artist}|{np.title}"
         if key != self._music_seen:
@@ -957,7 +969,7 @@ class CompanionSource:
         # 久坐看的是"人没离开"，这个看的是"你没换过应用"）
         if act.stuck_for(now) > SAME_APP_LONG_S and now - self._stuck_said > SAME_APP_LONG_S:
             self._stuck_said = now
-            self.say(say_line("SIT_LINES"), 4.0)
+            self.say(say_line("SIT_LINES"), 4.0, important=True)
             return
 
         self._quiet_kind = ""
@@ -997,7 +1009,9 @@ class CompanionSource:
             line = say_line("SIT_LINES")
         self.health_flip = not self.health_flip
         if line:
-            self.say(line, 5.5)
+            # 健康提醒是"该提醒的"，quiet（开会/写代码别打扰）压不住它。
+            # 第一版一刀切，CI 上直接挂了 test_fires_while_dsh_is_busy。
+            self.say(line, 5.5, important=True)
         self.next_health = now + HEALTH_EVERY
 
     # -- 持久化 -------------------------------------------------------------
@@ -1056,9 +1070,18 @@ class CompanionSource:
         if self.state in ("dozing", "sleeping", "yawning"):
             self._enter("waking", 2.6)
 
-    def say(self, text: str, secs: float = 4.0) -> None:
+    def say(self, text: str, secs: float = 4.0, important: bool = False) -> None:
+        """冒一句话。
+
+        `important=True` 的话**不受 quiet 压制** —— 该提醒的还是要提醒。
+
+        踩过：quiet（开会/写代码时别打扰）第一版压掉了**所有**气泡，
+        包括久坐提醒。CI 上直接挂了一条已有测试：
+        `test_fires_while_dsh_is_busy`。语义应该是"别闲聊"，不是"闭嘴"。
+        """
         self.bubble = text
         self.bubble_until = time.time() + secs
+        self.bubble_important = bool(important)
 
     # -- 状态机 -------------------------------------------------------------
     def _enter(self, state: str, hold: float = 0.0) -> None:
