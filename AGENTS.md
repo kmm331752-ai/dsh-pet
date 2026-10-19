@@ -83,6 +83,29 @@ def test_xxx_reaches_the_screen(self):
 要测**最终 snapshot 上的 `bubble`** —— 中间变量有值、最后被清掉，
 是最容易漏的一种。
 
+### 第五次：一次性的状态修正，打不过每轮都跑的状态机
+
+音乐那版在 `_music_tick` 里调了 `wake()` —— 把她从 sleeping 推到 waking。
+**下一轮状态机看见 idle 很大，又把她哄睡了。** CI 报的：
+
+    AssertionError: 'zzz' != 'music'
+
+`wake()` 修一次，状态机每轮推翻它。
+
+**修状态要用状态机自己的条件，不要用一次性调用。**
+
+```python
+elif self.state == "idle":
+    # ✅ 写进条件里
+    if self._music_playing():
+        pass                       # 有人在放歌 = 有人在
+    elif idle > sleep_after or ...:
+        self._enter("sleeping")
+```
+
+这条和上面四次是一对：那四次是**没走到**，这次是**走到了但被推翻**。
+共同点还是「你改的东西，和你以为在生效的地方，不是同一个」。
+
 ---
 
 ## 2. 属性在 `__init__` 里建，不要「用到才建」
