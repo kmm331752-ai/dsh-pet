@@ -1539,13 +1539,19 @@ class TestNewInteractions(E2EBase):
         """睡着被戳 = 惊醒，和醒着被戳**不是一回事**。
 
         原来两条走同一条路（同一套动画、同一句话），完全看不出区别。
+
+        **断言的是翻译后的表**（`I.t(x) for x in S.STARTLE_LINES`），
+        不是中文原表 —— `say_line()` 返回的是当前语言那句，
+        CI runner 是英文环境，直接比中文表会挂（规则 6）。
+        这样写任何语言下都对，不用钉语言。
         """
         app = self._app()
         app.snap.state = "sleeping"
         app._moved = False
         app._drag = (0, 0, 0, 0)
         app._on_release(type("E", (), {"y": 10, "x": 10, "x_root": 0, "y_root": 0})())
-        self.assertIn(app.companion.bubble, S.STARTLE_LINES,
+        want = [I.t(x) for x in S.STARTLE_LINES]
+        self.assertIn(app.companion.bubble, want,
                       f"说的不是惊醒的话：{app.companion.bubble!r}")
 
     def test_awake_poke_still_uses_the_normal_lines(self):
@@ -1554,6 +1560,7 @@ class TestNewInteractions(E2EBase):
         app.snap.state = "idle"
         app._moved = False
         app._drag = (0, 0, 0, 0)
+        startle = [I.t(x) for x in S.STARTLE_LINES]
         # 随机性：多戳几次，一次都不该是惊醒的话
         for _ in range(12):
             app.pet_streak = 0
@@ -1563,7 +1570,7 @@ class TestNewInteractions(E2EBase):
             app._drag = (0, 0, 0, 0)
             app._on_release(type("E", (), {"y": 10, "x": 10,
                                            "x_root": 0, "y_root": 0})())
-            self.assertNotIn(app.companion.bubble, S.STARTLE_LINES,
+            self.assertNotIn(app.companion.bubble, startle,
                              "醒着被戳说了惊醒的话")
 
     def test_all_three_overlays_render(self):
