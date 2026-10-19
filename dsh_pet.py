@@ -2130,9 +2130,18 @@ class PetApp:
         if self.companion is None:
             return
         self.companion._health_check(time.time(), idle_seconds())
-        # DSH 忙的时候 snapshot 是 watcher 给的，她说的话得手动贴上去
+        # 有活的、重要的话，就保证它出现在 snapshot 上。
+        #
+        # 原来这里有一句 `state not in ("idle", "offline")` —— 那是
+        # "DSH 忙的时候 snapshot 是 watcher 给的，得手动贴"的意思，
+        # 因为陪伴模式下 poll() 自己会贴。
+        #
+        # **但 quiet 会把它清掉**（开会/写代码时不冒泡），清完之后
+        # 这个守卫又跳过 idle，两边一夹气泡就没了 —— CI 上
+        # `test_fires_while_dsh_is_busy` 的 state='idle' 就是这么挂的。
+        #
+        # 现在不挑状态：只要有活气泡就补上。重复贴同一个值是幂等的。
         if (self.snap is not None
-                and self.snap.state not in ("idle", "offline")
                 and not self.focus_mode
                 and self.companion.bubble
                 and time.time() < self.companion.bubble_until):

@@ -868,7 +868,11 @@ class TestMusicAndActivity(E2EBase):
         app.companion.sitting_since = time.time() - 99999
         app.companion.next_health = 0.0
         app.companion.bubble_until = 0.0
-        with mock.patch.object(S, "idle_seconds", lambda: 1.0):
+        # idle_seconds 要 patch **两个模块** —— dsh_pet 里是
+        # `from pet_sources import *`，那是另一份引用（AGENTS.md 规则 6，
+        # 这个坑 2024 年就踩过一次，_patch_health 的 docstring 里写着）。
+        with mock.patch.object(S, "idle_seconds", lambda: 1.0), \
+             mock.patch.object(P, "idle_seconds", lambda: 1.0):
             app._poll()
             app.root.update()
         self.assertTrue(app.companion.bubble, "久坐提醒被 quiet 压没了")
