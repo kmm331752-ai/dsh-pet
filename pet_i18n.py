@@ -334,6 +334,18 @@ EN = {
     "复制全文": "Copy all",
     "已复制": "Copied",
 
+    # ── 音乐控制 ──
+    "播放": "Play", "暂停": "Pause", "下一首": "Next track",
+    "播放 / 暂停": "Play / Pause",
+    "上一首": "Previous track", "现在在放什么…": "What's playing…",
+    "现在在放什么": "Now playing", "现在没在放歌": "Nothing is playing",
+    "没有音乐源": "No music source", "没在放歌": "Nothing is playing",
+    "（没有标题）": "(no title)", "来源": "Source", "状态": "Status",
+    "播放中": "Playing", "已暂停": "Paused",
+    "音乐源不可用": "Music source unavailable",
+    "好，听你的": "Okay, you got it", "停了": "Stopped",
+    "继续放": "Playing again", "嗯": "Mm",
+
     # ── 音乐 / 前台应用 ──
     "这首好听": "I like this one", "跟着哼两句": "Humming along",
     "♪": "♪", "这个节奏不错": "Good beat", "你也听这个": "You listen to this too",

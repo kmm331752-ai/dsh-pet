@@ -1275,6 +1275,7 @@ SIT_LINES = ["坐好久了，起来动动", "腰要断了，站一会儿吧", "�
 # 音乐：她在听歌 / 刚切歌
 MUSIC_LINES = ["这首好听", "跟着哼两句", "♪", "这个节奏不错", "你也听这个"]
 MUSIC_CHANGE_LINES = ["换歌了", "这首是？", "前奏好听", "切歌了"]
+MUSIC_TOGGLE_LINES = ["好，听你的", "停了", "继续放", "嗯"]
 # 你在忙的时候她只出声不打扰（不冒泡）
 MEETING_LINES = ["你在开会，我安静", "不吵你", "我待着"]
 # 喂食：吃饱了 / 不爱吃 / 最爱，这三句由 pet_food 的机制触发
@@ -1298,6 +1299,7 @@ _LINE_DEFAULTS = {
     "EDGE_LINES": EDGE_LINES, "POMO_DONE_LINES": POMO_DONE_LINES,
     "SIT_LINES": SIT_LINES, "WATER_LINES": WATER_LINES,
     "MUSIC_LINES": MUSIC_LINES, "MUSIC_CHANGE_LINES": MUSIC_CHANGE_LINES,
+    "MUSIC_TOGGLE_LINES": MUSIC_TOGGLE_LINES,
     "MEETING_LINES": MEETING_LINES,
     "FULL_LINES": FULL_LINES, "DISLIKE_LINES": DISLIKE_LINES,
     "FAVORITE_LINES": FAVORITE_LINES,

@@ -363,7 +363,8 @@ class TestSourceSanity(unittest.TestCase):
         #   MUSIC_*_LINES   —— _music_tick 按"是不是切歌"选表（pool 变量）
         #   MEETING_LINES   —— _activity_tick 开会时用
         dynamic = {f"FOOD_{f.upper()}_LINES" for f in FD.FOOD_IDS}
-        dynamic |= {"MUSIC_LINES", "MUSIC_CHANGE_LINES", "MEETING_LINES"}
+        dynamic |= {"MUSIC_LINES", "MUSIC_CHANGE_LINES", "MEETING_LINES",
+                    "MUSIC_TOGGLE_LINES"}   # _music_cmd 按 cmd 选表
         for key in P.LINES:
             if key in dynamic:
                 continue

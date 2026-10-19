@@ -165,7 +165,23 @@ class FakeMusic:
         self.stopped = True
 
     def toggle_play(self):
+        # 和真 MusicSource 一样：只看 available 就排队，**不看有没有曲目**
+        # （真源就是这么写的 —— 所以不能拿它的返回值当"有没有在放"）
+        if not self.available:
+            return False
         self.commands.append("toggle")
+        return True
+
+    def next_track(self):
+        if not self.available:
+            return False
+        self.commands.append("next")
+        return True
+
+    def prev_track(self):
+        if not self.available:
+            return False
+        self.commands.append("prev")
         return True
 
 
@@ -849,6 +865,77 @@ class TestMusicAndActivity(E2EBase):
         self.assertTrue(app.snap.quiet, "DSH 忙的时候也该安静")
         self.assertEqual(app.snap.state, "tools", "状态不该被改掉")
 
+    # ── 反向控制：接口在那儿，用户得碰得到 ──
+    def test_music_commands_reach_the_source(self):
+        """三个控制命令要真的发到音乐源。
+
+        **这条测的是一个"接口写了但没人调用"的缺口**：
+        `MusicSource.toggle_play()` / `next_track()` / `prev_track()`
+        早就实现好了，但 `dsh_pet.py` 里一次都没调用过 ——
+        "反向控制"这条目标等于只做了一半。
+        """
+        app, fm, _ = self._app_with(fake_track("歌", "人"))
+        app._poll()
+        for cmd in ("toggle", "next", "prev"):
+            app._music_cmd(cmd)
+        self.assertEqual(fm.commands, ["toggle", "next", "prev"])
+        self.assertGreater(app.poke_until, time.time(), "控制后该播反应动画")
+
+    def test_music_command_is_gated_by_now_playing(self):
+        """没在放歌时**不发命令**，但要说一声。
+
+        判据必须和菜单启用/禁用用的是同一个 —— 否则会出现
+        "菜单说在放，按下去却什么都不发生"。
+        真 MusicSource 的 toggle_play() 只看 available 就排队，
+        所以不能拿它的返回值当"有没有在放"。
+        """
+        app, fm, _ = self._app_with(fake_track("歌", "人"))
+        app._poll()
+        fm.np = None
+        fm.commands.clear()
+        app.companion.bubble = ""
+        app._music_cmd("toggle")
+        self.assertEqual(fm.commands, [], "没在放歌却发了命令")
+        self.assertTrue(app.companion.bubble, "该说一声")
+
+    def test_music_command_without_a_source(self):
+        app = self.make_app(force_state=None, no_companion=False)
+        app.music = None
+        app.companion.music = None
+        app.companion.bubble = ""
+        app._music_cmd("toggle")                     # 不崩就算过
+        self.assertTrue(app.companion.bubble)
+
+    def test_music_ready_matches_what_the_menu_uses(self):
+        app, fm, _ = self._app_with(fake_track("歌", "人"))
+        self.assertTrue(app._music_ready())
+        fm.np = None
+        self.assertFalse(app._music_ready())
+        app.music = None
+        self.assertFalse(app._music_ready())
+
+    def test_music_menu_items_exist(self):
+        app, _, _ = self._app_with(None)
+        labels = []
+        for i in range(app.menu.index("end") + 1):
+            try:
+                if app.menu.type(i) == "command":
+                    labels.append(app.menu.entrycget(i, "label") or "")
+            except Exception:                        # noqa: BLE001
+                pass
+        joined = " ".join(labels)
+        for want in ("⏯", "⏭", "⏮", I.t("现在在放什么…")):
+            self.assertIn(want, joined, f"菜单里少了 {want}")
+
+    def test_track_change_plays_a_reaction(self):
+        """切歌时她要有反应 —— 走 _poll，不是直接调 _music_react。"""
+        app, fm, _ = self._app_with(fake_track("第一首", "人"))
+        app._poll()
+        app.poke_until = 0.0
+        fm.np = fake_track("第二首", "人")
+        app._poll()
+        self.assertGreater(app.poke_until, time.time(), "切歌没反应")
+
     def test_health_reminder_survives_quiet(self):
         """**CI 抓到的回归测试。**
 
@@ -928,6 +1015,150 @@ class TestMusicAndActivity(E2EBase):
         app._poll()
         app._quit()
         self.assertTrue(fm.stopped, "退出时要停后台线程")
+
+
+class TestWorksWithoutDSH(E2EBase):
+    """**目标验收**：没有 DSH 时功能不残缺。
+
+    DSH 只是她的数据源之一，不是前提。这一组把 DSH 指到空目录
+    （等价于"这台机器没装 DSH"），然后**逐个功能走一遍** ——
+    不是看代码在不在，是看它能不能用。
+
+    写这一组的时候抓到两次"看着像 bug、其实是测试写错了"：
+      · 60 轮紧循环里没有时间流逝，`state_until` 永远不过 →
+        她一直停在 gazing，误判成"状态机坏了"
+      · 配置是在 `_quit()` 里写的，检查放在了 `_quit()` 之前 →
+        误判成"配置没存下来"
+    """
+
+    def _no_dsh(self):
+        return mock.patch.object(S, "list_session_files", lambda: [])
+
+    def test_she_lives_her_own_life(self):
+        """没 DSH 时她自己过日子，不是卡在 offline，也不卡在一个状态。
+
+        **时间要自己推，不能靠 sleep**（前两版都栽在这儿）：
+
+          · 第一版 sleep 0.05×30 = 1.5 秒 —— `gazing` 的保持期比这长，
+            只看到 gazing，误判成"状态机坏了"
+          · 第二版干脆不 sleep —— 墙钟没走，`state_until` 永远不过，
+            **她当然一直停在 gazing**
+
+        正确做法：钉一个**可控时钟**，每轮往前推 3 秒。既确定又快，
+        而且真的在测状态机（而不是在测我 sleep 了多久）。
+
+        **时钟要从"现在"起步，不能随便挑个常数**：`next_roam` /
+        `next_peek` 是 `CompanionSource.__init__` 里用**真实时间**算的，
+        假时钟要是比它早（比如 1_700_000_000），`now > next_roam`
+        永远不成立 —— 她会安安静静 idle 两分钟，看着像"卡住了"。
+        第三版就是这么挂的。
+        """
+        clock = [time.time()]
+
+        def tick_time():
+            clock[0] += 3.0
+            return clock[0]
+
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            self.assertEqual(app.watcher.poll().state, "offline")
+
+            with mock.patch.object(S.time, "time", tick_time), \
+                 mock.patch.object(P.time, "time", tick_time), \
+                 mock.patch.object(P, "cursor_pos", lambda: (99999, 99999)):
+                app._poll()
+                self.assertTrue(app.in_companion, f"state={app.snap.state}")
+                self.assertNotEqual(app.snap.state, "offline")
+
+                seen = set()
+                for _ in range(40):
+                    app.companion.mouse_at = 0.0   # 鼠标"很久没动"，她不会去看
+                    app._poll()
+                    app.root.update()
+                    seen.add(app.snap.state)
+
+            # 40 轮 × 3 秒 = 2 分钟，够她换好几次状态了
+            self.assertGreaterEqual(
+                len(seen), 2,
+                f"两分钟里只出现了一个状态，她卡住了：{sorted(seen)}")
+            self.assertNotIn("offline", seen, "不该退回 offline")
+
+    def test_feeding_works(self):
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            m = app.companion.mood
+            m.satiety = 0.0
+            before = m.feeds
+            app._do_feed("ramen")
+            self.assertEqual(m.feeds, before + 1)
+            self.assertGreater(m.satiety, 0.0)
+            self.assertTrue(m.favorites and m.dislike)
+
+    def test_music_works(self):
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            fm = FakeMusic(fake_track("歌", "人"))
+            app.music, app.companion.music = fm, fm
+            app._poll()
+            self.assertEqual(app.snap.music, "人 - 歌")
+            self.assertEqual(app._overlay_kind(time.time()), "music")
+            app._music_cmd("toggle")
+            self.assertEqual(fm.commands, ["toggle"])
+
+    def test_activity_awareness_works(self):
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            fa = FakeActivity(AC.Activity(process="wemeetapp.exe",
+                                          category="meeting"))
+            app.activity, app.companion.activity = fa, fa
+            app._poll()
+            self.assertTrue(app.snap.quiet)
+
+    def test_health_reminder_works(self):
+        """**没 DSH 时最容易漏的一个** —— 它当年就是挂在 poll() 里废掉的。"""
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            app.companion.sitting_since = 0
+            app.companion.next_health = 0
+            app.companion.bubble = ""
+            app.companion.bubble_until = 0
+            with mock.patch.object(S, "HEALTH_FIRST", 0), \
+                 mock.patch.object(S, "HEALTH_EVERY", 0), \
+                 mock.patch.object(S, "idle_seconds", lambda: 1.0), \
+                 mock.patch.object(P, "idle_seconds", lambda: 1.0):
+                app._poll()
+            self.assertTrue(app.snap.bubble, "没 DSH 时久坐提醒不出来了")
+
+    def test_windows_open(self):
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            for name, opener in (("设置", app._open_settings),
+                                 ("皮肤预览", app._open_skin_preview),
+                                 ("刚才错在哪", app._show_last_error)):
+                with self.subTest(window=name):
+                    opener()
+                    app.root.update()
+
+    def test_weekly_report_exports(self):
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            app.companion.mood.note_completion(ok=True)
+            app._export_week()
+            self.assertTrue(os.path.exists(B.week_path()))
+
+    def test_survives_a_restart(self):
+        """喂过、有口味 —— 重启后还记得。"""
+        with self._no_dsh():
+            app = self.make_app(force_state=None, no_companion=False)
+            m = app.companion.mood
+            m.satiety = 0.0
+            app._do_feed("ramen")
+            favs, feeds = list(m.favorites), m.feeds
+            app._quit()
+
+            app2 = self.make_app(force_state=None, no_companion=False)
+            self.assertEqual(app2.companion.mood.favorites, favs)
+            self.assertEqual(app2.companion.mood.feeds, feeds)
 
 
 if __name__ == "__main__":

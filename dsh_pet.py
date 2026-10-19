@@ -312,6 +312,18 @@ class PetApp:
         self.menu = self.tk.Menu(r, tearoff=0)
         self.menu.add_command(label=t("喂她吃点什么") + " 🍡",
                               command=self._open_feed_window)
+        # 音乐控制。**没在放歌时整组隐藏**（在 _on_menu 里动态改）——
+        # 平时用不到的菜单项是噪音。
+        self.menu.add_separator()
+        self.menu.add_command(label=t("播放") + " / " + t("暂停") + " ⏯",
+                              command=lambda: self._music_cmd("toggle"))
+        self.menu.add_command(label=t("下一首") + " ⏭",
+                              command=lambda: self._music_cmd("next"))
+        self.menu.add_command(label=t("上一首") + " ⏮",
+                              command=lambda: self._music_cmd("prev"))
+        self.menu.add_command(label=t("现在在放什么…"),
+                              command=self._show_now_playing)
+        self.menu.add_separator()
         self.menu.add_command(label=t("展开详情") + "/" + t("收起详情"), command=self._toggle_detail)
         self.menu.add_separator()
         self.menu.add_command(label=t("自动跟随活跃会话"), command=self._follow_auto)
@@ -738,7 +750,11 @@ class PetApp:
             menu = pystray.Menu(
                 pystray.MenuItem(t("显示 / 隐藏桌宠"),
                                  lambda: self._tray_actions.append("toggle"), default=True),
-                pystray.MenuItem(t("展开 / 收起详情"),
+                pystray.MenuItem(t("播放 / 暂停"), lambda: (
+                self._music_cmd("toggle"), self._tray_sync())),
+            pystray.MenuItem(t("下一首"), lambda: (
+                self._music_cmd("next"), self._tray_sync())),
+            pystray.MenuItem(t("展开 / 收起详情"),
                                  lambda: self._tray_actions.append("detail")),
                 pystray.MenuItem(t("隐私模式"), lambda: self._tray_actions.append("privacy"),
                                  checked=lambda _i: self.privacy),
@@ -798,6 +814,8 @@ class PetApp:
                 self._toggle_privacy()
             elif act == "feed":
                 self._feed()
+            elif act == "music":
+                self._music_cmd("toggle")
             elif act == "settings":
                 self._open_settings()
             elif act == "ghost":
@@ -1766,6 +1784,125 @@ class PetApp:
                 self._say(say_line("EDGE_LINES"), 2.4)
         self._save_config()
 
+    # -- 音乐控制 -----------------------------------------------------------
+    def _music_ready(self) -> bool:
+        """有音乐源、且真的在放东西 —— 菜单项和热键据此决定做不做事。"""
+        if getattr(self, "music", None) is None:
+            return False
+        return self.music.poll() is not None
+
+    def _music_cmd(self, cmd: str) -> None:
+        """播放/暂停/切歌。
+
+        `MusicSource` 那边的接口早就写好了，但一直没人调用 ——
+        "反向控制"这条等于只做了一半。这个函数就是那另一半。
+        """
+        m = getattr(self, "music", None)
+        if m is None:
+            self._say(t("没有音乐源"), 2.5)
+            return
+        # 判据要和菜单启用/禁用用的是**同一个** —— 否则会出现
+        # "菜单说在放，按下去却什么都不发生"。
+        # 真 MusicSource 的 toggle_play() 只看 available 就排队（哪怕当前
+        # 没有曲目），所以不能拿它的返回值当"有没有在放"。
+        if not self._music_ready():
+            self._say(t("没在放歌"), 2.5)
+            return
+        ok = {"toggle": m.toggle_play, "next": m.next_track,
+              "prev": m.prev_track}.get(cmd, lambda: False)()
+        if not ok:
+            self._say(t("没在放歌"), 2.5)
+            return
+        # 她自己的反应：说一句 + 冒个音符
+        line = {"toggle": "MUSIC_TOGGLE_LINES", "next": "MUSIC_CHANGE_LINES",
+                "prev": "MUSIC_CHANGE_LINES"}.get(cmd)
+        if line and self.companion is not None:
+            self.companion.say(say_line(line), 2.5)
+        self._play_sound("pet")
+        self._music_react()
+
+    def _music_react(self) -> None:
+        """放一下"戳一下"的反应动画 —— 她精神一下。
+
+        复用已有的 poke 反应素材：任何皮肤只要有这个反应就能用，
+        没有的皮肤会自动跳过（reaction_sprites 里查不到就不播）。
+        """
+        durs = self.reaction_durs.get("poke") or []
+        if durs:
+            self.poke_until = time.time() + sum(durs) / 1000.0
+
+    def _show_now_playing(self) -> None:
+        """「现在在放什么」：曲目 + 来源 + 进度，还能从这儿控制。"""
+        tk = self.tk
+        m = getattr(self, "music", None)
+        np = m.poll() if m is not None else None
+        if getattr(self, "_now_win", None) is not None:
+            try:
+                self._now_win.destroy()
+            except Exception:                            # noqa: BLE001
+                pass
+        win = tk.Toplevel(self.root)
+        self._now_win = win
+        win.title(t("现在在放什么"))
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+
+        if np is None:
+            tk.Label(win, text=t("现在没在放歌"), anchor="w").pack(
+                fill="x", padx=14, pady=14)
+            if m is not None and not m.available:
+                tk.Label(win, text=m.last_error or t("音乐源不可用"),
+                         fg="#888", wraplength=320, justify="left").pack(
+                    fill="x", padx=14)
+                tk.Label(win, text=t("装依赖：pip install winrt-runtime "
+                                     "winrt-Windows.Media.Control …"),
+                         fg="#888", wraplength=320, justify="left").pack(
+                    fill="x", padx=14, pady=(0, 8))
+            tk.Button(win, text=t("关闭"), command=lambda: (
+                win.destroy(), setattr(self, "_now_win", None))).pack(pady=8)
+            return
+
+        head = tk.Frame(win)
+        head.pack(fill="x", padx=14, pady=(12, 4))
+        tk.Label(head, text=np.title or t("（没有标题）"), anchor="w",
+                 font=("Microsoft YaHei UI", 11, "bold"),
+                 wraplength=320, justify="left").pack(fill="x")
+        if np.artist:
+            tk.Label(head, text=np.artist, anchor="w", fg="#8FA6C4").pack(fill="x")
+        if np.album:
+            tk.Label(head, text=np.album, anchor="w", fg="#888").pack(fill="x")
+
+        info = tk.Frame(win)
+        info.pack(fill="x", padx=14, pady=(6, 0))
+        tk.Label(info, text=f"{t('来源')}: {np.app}", anchor="w",
+                 fg="#888").pack(fill="x")
+        tk.Label(info, text=f"{t('状态')}: "
+                            + (t("播放中") if np.playing else t("已暂停")),
+                 anchor="w", fg="#888").pack(fill="x")
+        if np.duration > 0:
+            bar = tk.Canvas(info, width=300, height=10, highlightthickness=0,
+                            bg="#2A2E3A")
+            bar.pack(fill="x", pady=(4, 0))
+            bar.create_rectangle(0, 0, int(300 * np.progress()), 10,
+                                 fill="#7FB3E8", outline="")
+            tk.Label(info, text=f"{_fmt_ms(np.position * 1000)} / "
+                                f"{_fmt_ms(np.duration * 1000)}",
+                     anchor="w", fg="#888").pack(fill="x")
+
+        bar2 = tk.Frame(win)
+        bar2.pack(fill="x", padx=14, pady=(10, 12))
+        tk.Button(bar2, text="⏮", width=3,
+                  command=lambda: self._music_cmd("prev")).pack(side="left")
+        tk.Button(bar2, text="⏯", width=3,
+                  command=lambda: (self._music_cmd("toggle"),
+                                   win.destroy(),
+                                   setattr(self, "_now_win", None))).pack(
+            side="left", padx=4)
+        tk.Button(bar2, text="⏭", width=3,
+                  command=lambda: self._music_cmd("next")).pack(side="left")
+        tk.Button(bar2, text=t("关闭"), command=lambda: (
+            win.destroy(), setattr(self, "_now_win", None))).pack(side="right")
+
     # -- 喂食 ---------------------------------------------------------------
     def _open_feed_window(self) -> None:
         """选食物的小窗口：12 个图标，点一下喂。
@@ -1892,6 +2029,20 @@ class PetApp:
         self._save_config()
 
     def _on_menu(self, e):
+        # 没在放歌就把音乐那几项灰掉 —— 用不到的菜单项是噪音
+        ready = self._music_ready()
+        for idx in range(self.menu.index("end") + 1):
+            try:
+                if self.menu.type(idx) != "command":
+                    continue
+                label = self.menu.entrycget(idx, "label") or ""
+                if "⏯" in label or "⏭" in label or "⏮" in label:
+                    self.menu.entryconfigure(idx, state="normal" if ready else "disabled")
+                elif t("现在在放什么…") in label:
+                    self.menu.entryconfigure(
+                        idx, state="normal" if self.music is not None else "disabled")
+            except Exception:                            # noqa: BLE001
+                continue
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
@@ -1992,8 +2143,14 @@ class PetApp:
                 # 音乐 / 前台应用：**无条件跑**，不管状态是谁驱动的。
                 # 挂在陪伴模式里的话，DSH 一忙就全失效（踩过）。
                 if self.companion is not None:
+                    _before = self.companion._music_seen
                     self.companion.tick_sources(time.time())
                     self.companion.decorate(self.snap, time.time())
+                    # 切歌了 → 播一下反应动画（她精神一下）。
+                    # 只认"从有到有"的变化，第一次发现音乐不算切歌。
+                    _after = self.companion._music_seen
+                    if _before and _after and _before != _after:
+                        self._music_react()
 
                 self._pomodoro_tick(time.time())
                 if self.focus_mode:

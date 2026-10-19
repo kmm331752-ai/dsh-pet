@@ -31,6 +31,7 @@ MOD_ALT, MOD_CONTROL, MOD_SHIFT = 0x0001, 0x0002, 0x0004
 WM_HOTKEY, WM_QUIT = 0x0312, 0x0012
 VK_P, VK_F, VK_S = 0x50, 0x46, 0x53
 VK_H, VK_D = 0x48, 0x44
+VK_M = 0x4D
 
 HOTKEYS = {
     1: (MOD_CONTROL | MOD_ALT, VK_P, "toggle"),      # 显示 / 隐藏
@@ -38,6 +39,7 @@ HOTKEYS = {
     3: (MOD_CONTROL | MOD_ALT, VK_S, "settings"),    # 打开设置
     4: (MOD_CONTROL | MOD_ALT, VK_H, "ghost"),       # 截图模式：整个隐藏（连托盘也不显示）
     5: (MOD_CONTROL | MOD_ALT, VK_D, "focus"),       # 专注模式：她安静待机不冒泡
+    6: (MOD_CONTROL | MOD_ALT, VK_M, "music"),       # 播放 / 暂停
 }
 
 # 番茄钟时长选项（分钟）
@@ -94,7 +96,7 @@ class HotKeys(threading.Thread):
 # 网络不通、限流、被墙都只算「查不到」，绝不能让桌宠因此启动不了或弹错误。
 
 REPO = "kmm331752-ai/dsh-pet"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 UPDATE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 
