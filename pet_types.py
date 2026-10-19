@@ -99,6 +99,8 @@ class Snapshot:
     wander: float = 0.0                               # 窗口水平目标位置（绝对坐标，0 = 不动）
     slow_tools: list = field(default_factory=list)    # 主任务最慢的工具 [(名字, 毫秒)]
     focus_x: float = 0.0                              # 非 0 时把窗口移到这个 x（等待提醒用）
+    quiet: bool = False                               # 你在开会/专注时她闭嘴（音乐源和活动源决定）
+    music: str = ""                                   # 正在放什么（"歌手 - 歌名"），空 = 没在放
 
     @property
     def elapsed_ms(self) -> Optional[float]:

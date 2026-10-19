@@ -74,6 +74,22 @@ def main() -> int:
         "--workpath", os.path.join(STAGE, "_build"),
         "--specpath", STAGE,
     ]
+    # winrt 是**懒加载**的（在 try/except 里 import，没装就安静地不可用），
+    # 所以 PyInstaller 的静态分析找不到它们 —— 得显式点名。
+    #
+    # 用**模块化**的 winrt-* 包，不是单体的 winsdk：
+    #   winsdk（单体）    41.7 MB（_winrt.pyd 一个就 37.6 MB）
+    #   winrt-*（模块化）  4.8 MB
+    # 功能一样（SMTC 读+控制都实测过），差 8.7 倍。
+    for mod in (
+        "winrt.windows.media.control",
+        "winrt.windows.media.core",
+        "winrt.windows.media.playback",
+        "winrt.windows.storage",
+        "winrt.windows.foundation",
+        "winrt.windows.foundation.collections",
+    ):
+        cmd += ["--hidden-import", mod]
     if icon:
         cmd += ["--icon", icon]
     cmd.append(os.path.join(STAGE, "dsh_pet.py"))

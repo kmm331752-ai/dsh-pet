@@ -28,10 +28,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dsh_pet as P  # noqa: E402
 import pet_accessories as A  # noqa: E402
+import pet_activity as AC  # noqa: E402
 import pet_base as B  # noqa: E402
 import pet_chat as C  # noqa: E402
 import pet_food as FD  # noqa: E402
 import pet_i18n as I  # noqa: E402
+import pet_music as MU  # noqa: E402
 import pet_platform as PF  # noqa: E402
 import pet_sources as S  # noqa: E402
 
@@ -356,10 +358,12 @@ class TestSourceSanity(unittest.TestCase):
         say_line("KEY")。第一版写死了，把 MORNING/NIGHT 误报成没接线 ——
         而它同时也漏掉了 DIZZY/GRAB/EDGE 这三组真的没接的。
         """
-        # FOOD_*_LINES 是**动态拼的键**（f"FOOD_{fid.upper()}_LINES"），
-        # 源码里搜不到字面量。它们不是孤儿 —— 由 _do_feed 按食物 id 取。
-        # 这一条改不了写成字面量：12 种食物写 12 个 if 只是为了让测试好写。
+        # 有些键是**动态拼的**，源码里搜不到字面量，但它们不是孤儿：
+        #   FOOD_*_LINES    —— _do_feed 按食物 id 取（12 种写 12 个 if 只为好测）
+        #   MUSIC_*_LINES   —— _music_tick 按"是不是切歌"选表（pool 变量）
+        #   MEETING_LINES   —— _activity_tick 开会时用
         dynamic = {f"FOOD_{f.upper()}_LINES" for f in FD.FOOD_IDS}
+        dynamic |= {"MUSIC_LINES", "MUSIC_CHANGE_LINES", "MEETING_LINES"}
         for key in P.LINES:
             if key in dynamic:
                 continue
@@ -1928,6 +1932,114 @@ class TestFeeding(unittest.TestCase):
         self.assertTrue(c.mood.favorites, "没补上口味")
         self.assertTrue(c.mood.dislike, "没补上不爱吃的")
         self.assertAlmostEqual(c.mood.affection, 0.7, msg="老数据丢了")
+
+
+class TestMusicSource(unittest.TestCase):
+    """音乐源。走 SMTC —— 一个 API 通吃所有播放器。
+
+    **测的是纯逻辑，不碰真 SMTC。** 真 SMTC 读的是这台机器上正在放什么，
+    测试依赖它就等于依赖机器状态（AGENTS.md 规则 6）。
+    真正要跑 SMTC 的验证在 tools/ 下，是手动的。
+    """
+
+    def test_label(self):
+        self.assertEqual(MU.NowPlaying(title="歌", artist="人").label(), "人 - 歌")
+        self.assertEqual(MU.NowPlaying(title="歌").label(), "歌")
+        self.assertEqual(MU.NowPlaying(artist="人").label(), "人")
+        self.assertEqual(MU.NowPlaying().label(), "")
+
+    def test_is_music_needs_a_title(self):
+        self.assertTrue(MU.NowPlaying(title="x").is_music)
+        self.assertFalse(MU.NowPlaying(artist="人").is_music)
+        self.assertFalse(MU.NowPlaying().is_music)
+
+    def test_progress(self):
+        self.assertEqual(MU.NowPlaying().progress(), 0.0)
+        self.assertEqual(MU.NowPlaying(duration=0, position=10).progress(), 0.0)
+        self.assertAlmostEqual(MU.NowPlaying(position=30, duration=120).progress(), 0.25)
+        self.assertEqual(MU.NowPlaying(position=999, duration=120).progress(), 1.0)
+        self.assertEqual(MU.NowPlaying(position=-5, duration=120).progress(), 0.0)
+
+    def test_just_changed(self):
+        self.assertFalse(MU.NowPlaying(title="x").just_changed(), "changed_at=0 不算")
+        self.assertTrue(MU.NowPlaying(title="x", changed_at=time.time()).just_changed())
+        self.assertFalse(
+            MU.NowPlaying(title="x", changed_at=time.time() - 999).just_changed())
+
+    def test_poll_never_blocks_when_not_started(self):
+        """没启动时必须立刻返回 —— 它跑在 Tk 主循环里，阻塞就是界面卡死。"""
+        s = MU.MusicSource()
+        t0 = time.time()
+        for _ in range(200):
+            s.poll()
+        self.assertLess((time.time() - t0) / 200, 0.001)
+        self.assertIsNone(s.poll())
+        self.assertEqual(s.sessions(), [])
+
+    def test_control_is_a_noop_when_unavailable(self):
+        s = MU.MusicSource()
+        self.assertFalse(s.toggle_play())
+        self.assertFalse(s.next_track())
+        self.assertFalse(s.prev_track())
+
+    def test_stop_without_start_is_safe(self):
+        MU.MusicSource().stop()
+
+
+class TestActivitySource(unittest.TestCase):
+    """前台应用感知。零新依赖 —— 全是 ctypes 调 Win32。"""
+
+    def test_classify_common_apps(self):
+        cases = {
+            "Code.exe": "coding", "Cursor.exe": "coding", "pwsh.exe": "coding",
+            "chrome.exe": "browsing", "msedge.exe": "browsing",
+            "cloudmusic.exe": "music", "QQMusic.exe": "music",
+            "vlc.exe": "video", "potplayermini64.exe": "video",
+            "wemeetapp.exe": "meeting", "Zoom.exe": "meeting",
+            "wechat.exe": "chat", "photoshop.exe": "design",
+            "WINWORD.EXE": "office", "steam.exe": "game",
+        }
+        for proc, want in cases.items():
+            with self.subTest(proc=proc):
+                self.assertEqual(AC.classify(proc), want)
+
+    def test_classify_unknown_is_other(self):
+        self.assertEqual(AC.classify("随便什么.exe"), "other")
+        self.assertEqual(AC.classify(""), "other")
+        self.assertEqual(AC.classify("zzz-not-a-real-app.exe"), "other")
+
+    def test_classify_is_case_and_suffix_insensitive(self):
+        self.assertEqual(AC.classify("CLOUDMUSIC.EXE"), "music")
+        self.assertEqual(AC.classify("chrome"), "browsing")
+
+    def test_activity_helpers(self):
+        a = AC.Activity(process="Code.exe", category="coding")
+        self.assertEqual(a.label(), "Code")
+        self.assertTrue(a.known)
+        self.assertFalse(AC.Activity().known)
+        self.assertTrue(a.same_app(AC.Activity(process="code.EXE")))
+        self.assertFalse(a.same_app(AC.Activity(process="chrome.exe")))
+        self.assertFalse(a.same_app(None))
+
+    def test_stuck_for(self):
+        self.assertEqual(AC.Activity(process="x").stuck_for(), 0.0, "since=0 返回 0")
+        a = AC.Activity(process="x", since=time.time() - 100)
+        self.assertAlmostEqual(a.stuck_for(), 100, delta=2)
+
+    def test_disabled_source_is_inert(self):
+        s = AC.ActivitySource(enabled=False)
+        self.assertFalse(s.available)
+        self.assertIsNone(s.poll())
+
+    def test_title_is_not_persisted(self):
+        """窗口标题可能很敏感（文档名、聊天对象）—— 绝不能进 pet_mood.json。
+
+        查法：看 Mood 的字段里有没有 title 之类的东西。
+        """
+        import dataclasses
+        fields = {f.name for f in dataclasses.fields(S.Mood)}
+        for bad in ("title", "window", "activity", "process", "foreground"):
+            self.assertNotIn(bad, fields, f"Mood 里不该有 {bad}")
 
 
 class TestConfig(unittest.TestCase):

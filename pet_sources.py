@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pet_activity
+import pet_music
+
 import pet_food
 
 import pet_platform
@@ -564,6 +567,8 @@ NIGHT_HOURS = (23, 7)            # [23:00, 07:00)
 # 判据是系统空闲时间：idle 很短 = 人在用电脑，一直很短 = 久坐。
 # 走开超过 HEALTH_BREAK 就重置计时，回来重新算，不会追着人提醒。
 HEALTH_ON = True
+# 同一个应用连续待多久算"待太久"（提醒起来动动）
+SAME_APP_LONG_S = 50 * 60
 HEALTH_EVERY = 50 * 60           # 连续活动多久提醒一次
 HEALTH_FIRST = 45 * 60           # 启动后多久开始算（别一开就提醒）
 HEALTH_BREAK = 5 * 60            # 离开这么久算休息过
@@ -833,6 +838,131 @@ class CompanionSource:
         self.next_health = time.time() + HEALTH_FIRST
         self.health_flip = False        # 在「起来动动」和「喝口水」之间轮换
 
+        # ── 音乐 / 前台应用 ──
+        # 这两个源**可以注入**（测试必须注入假的：SMTC 读的是机器上真在放什么，
+        # 测试依赖它就违反了"测试不许依赖机器状态"）。
+        # None 表示"还没建"，由 attach_sources() 建真的。
+        self.music = None
+        self.activity = None
+        self._music_seen = ""           # 上一轮在放什么（判断切歌）
+        self._music_since = 0.0         # 这首从什么时候开始
+        self._music_said = 0.0          # 上次为这首歌说话的时刻（别一直说）
+        self._quiet_until = 0.0         # 到这个时刻之前不冒泡
+        self._quiet_kind = ""           # 为什么安静（meeting / coding）
+        self._stuck_said = 0.0          # 上次提醒"同一个应用待太久"的时刻
+
+    # -- 数据源 -------------------------------------------------------------
+    def attach_sources(self, music=None, activity=None) -> None:
+        """挂上音乐源和活动源。传 None 表示用真的。
+
+        单独一个方法而不是塞进 __init__：测试里要能塞假的进去，
+        而 __init__ 在 App 构造时就被调用了。
+        """
+        if music is not None:
+            self.music = music
+        if activity is not None:
+            self.activity = activity
+
+    @property
+    def now_playing(self):
+        """当前在放什么。没有音乐源或没在放就 None。"""
+        return self.music.poll() if self.music is not None else None
+
+    @property
+    def foreground(self):
+        """当前前台应用。没有活动源就 None。"""
+        return self.activity.poll() if self.activity is not None else None
+
+    def tick_sources(self, now: float) -> None:
+        """每轮都要调 —— **不管状态是谁驱动的**。
+
+        音乐和应用感知不是"陪伴模式的功能"，是**她对环境的感知**。
+        DSH 在跑的时候你照样可能在开会、照样可能在听歌。
+
+        踩过：这两个 tick 原来只在 CompanionSource.poll() 里调，于是
+        DSH 一忙（watcher 分支）就全失效 —— 和久坐提醒同一个错误。
+        PetApp._poll() 现在无条件调这个，位置和 _health_tick 一样。
+        """
+        self._music_tick(now)
+        self._activity_tick(now, idle_seconds())
+
+    def decorate(self, snap, now: float) -> None:
+        """把音乐/安静状态贴到**任何来源**的 snapshot 上。
+
+        poll() 自己产出的 snapshot 也走这里 —— 一处逻辑，两条分支共用。
+        """
+        if now < self._quiet_until:
+            snap.quiet = True
+
+        np = self.now_playing
+        if np is not None and np.is_music and np.playing:
+            snap.music = np.label()
+            if not snap.bubble:
+                snap.detail_line = "♪ " + snap.music
+
+        if now < self.bubble_until and self.bubble:
+            snap.detail_line = self.bubble
+            snap.bubble = True
+
+    def _music_tick(self, now: float) -> None:
+        """跟着音乐做反应。
+
+        · 刚开始放 → 冒个泡（一首歌只说一次，不刷屏）
+        · 切歌 → 说一句"换歌了"
+        · 一直在放 → 不冒泡，但让她挂着 music 装饰（在 PetApp 那边画）
+        """
+        np = self.now_playing
+        if np is None or not np.is_music or not np.playing:
+            self._music_seen = ""
+            self._music_since = 0.0
+            return
+
+        key = f"{np.artist}|{np.title}"
+        if key != self._music_seen:
+            self._music_seen = key
+            self._music_since = now
+            # 切歌才说话，而且同一首不重复
+            if now - self._music_said > 30:
+                self._music_said = now
+                pool = "MUSIC_CHANGE_LINES" if self._music_since else "MUSIC_LINES"
+                self.say(say_line(pool), 3.5)
+
+    def _activity_tick(self, now: float, idle: float) -> None:
+        """按你在用什么软件决定"该不该出声"。
+
+        **这是这个功能的意义**：她在你写代码/开会的时候别打扰你，
+        而不是不分场合地冒泡。之前她不知道你在干什么，只能按空闲时间猜。
+        """
+        act = self.foreground
+        if act is None or not act.known:
+            self._quiet_until = 0.0
+            self._quiet_kind = ""
+            return
+
+        # 开会 / 视频通话：绝对安静
+        if act.category == "meeting":
+            self._quiet_kind = "meeting"
+            self._quiet_until = now + 5.0          # 一直开会就一直续
+            if not self._quiet_kind or random.random() < 0.002:
+                self.say(say_line("MEETING_LINES"), 2.5)
+            return
+
+        # 写代码 / 看视频 / 玩游戏：不主动说话（但你碰她她还是会回应）
+        if act.category in ("coding", "video", "game"):
+            self._quiet_kind = act.category
+            self._quiet_until = now + 5.0
+            return
+
+        # 同一个应用待太久 → 提醒起来动动（和久坐提醒是两回事：
+        # 久坐看的是"人没离开"，这个看的是"你没换过应用"）
+        if act.stuck_for(now) > SAME_APP_LONG_S and now - self._stuck_said > SAME_APP_LONG_S:
+            self._stuck_said = now
+            self.say(say_line("SIT_LINES"), 4.0)
+            return
+
+        self._quiet_kind = ""
+        self._quiet_until = 0.0
+
     # -- 健康提醒 -----------------------------------------------------------
     def _health_check(self, now: float, idle: float) -> None:
         """久坐 / 喝水提醒。
@@ -1034,9 +1164,9 @@ class CompanionSource:
         snap.mirror = self.gaze_dir < 0
         snap.wander = self.wander_target
         # 气泡：她说的话占用副行文案，但用强调色画出来，并进 _card_cache 的键
-        if now < self.bubble_until and self.bubble:
-            snap.detail_line = self.bubble
-            snap.bubble = True
+        # 音乐 / 安静状态贴上去。和 PetApp 用的是同一个函数 ——
+        # 两条分支（陪伴模式 / DSH 模式）共用一套逻辑。
+        self.decorate(snap, now)
         return snap
 
     # -- 溜达目标 -----------------------------------------------------------
@@ -1119,6 +1249,11 @@ NIGHT_LINES = ["还不睡？", "该休息了", "夜深了"]
 EDGE_LINES = ["抓到了", "不松手", "救命…"]
 POMO_DONE_LINES = ["时间到！", "该休息了", "这一轮结束了", "起来走两步吧"]
 SIT_LINES = ["坐好久了，起来动动", "腰要断了，站一会儿吧", "别一直坐着啦"]
+# 音乐：她在听歌 / 刚切歌
+MUSIC_LINES = ["这首好听", "跟着哼两句", "♪", "这个节奏不错", "你也听这个"]
+MUSIC_CHANGE_LINES = ["换歌了", "这首是？", "前奏好听", "切歌了"]
+# 你在忙的时候她只出声不打扰（不冒泡）
+MEETING_LINES = ["你在开会，我安静", "不吵你", "我待着"]
 # 喂食：吃饱了 / 不爱吃 / 最爱，这三句由 pet_food 的机制触发
 FULL_LINES = pet_food.FULL_LINES
 DISLIKE_LINES = pet_food.DISLIKE_LINES
@@ -1139,6 +1274,8 @@ _LINE_DEFAULTS = {
     "MORNING_LINES": MORNING_LINES, "NIGHT_LINES": NIGHT_LINES,
     "EDGE_LINES": EDGE_LINES, "POMO_DONE_LINES": POMO_DONE_LINES,
     "SIT_LINES": SIT_LINES, "WATER_LINES": WATER_LINES,
+    "MUSIC_LINES": MUSIC_LINES, "MUSIC_CHANGE_LINES": MUSIC_CHANGE_LINES,
+    "MEETING_LINES": MEETING_LINES,
     "FULL_LINES": FULL_LINES, "DISLIKE_LINES": DISLIKE_LINES,
     "FAVORITE_LINES": FAVORITE_LINES,
     "FOOD_DANGO_LINES": pet_food.FOODS["dango"]["line"],

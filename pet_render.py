@@ -179,6 +179,27 @@ def _overlay_layer(kind: str, phase: float) -> Image.Image:
             d.line([nx + r, ny - r * 2.4, nx + r * 2.4, ny - r * 1.7],
                    fill=col, width=max(2, int(2.4 * s)))
 
+    elif kind == "music":
+        # 在听歌：三个音符错开相位往上飘。
+        # 和 "note"（心情好飘一个）区别开 —— 那个是瞬间反应，这个是持续状态。
+        # 也刻意不用绿色：note 是绿的，听歌用暖色，一眼分得出来。
+        for i in range(3):
+            t = (phase * 1.4 + i * 0.33) % 1.0
+            side = -1 if i % 2 else 1
+            nx = cx + side * W * (0.10 + 0.07 * i)
+            ny = top_y + H * 0.34 - t * (H * 0.22)
+            alpha = int(235 * (1.0 - t * 0.75))
+            if alpha <= 20:
+                continue
+            r = (6.5 - i * 0.8) * s
+            col = ((255, 196, 120, alpha) if i % 2 == 0
+                   else (255, 168, 196, alpha))
+            d.ellipse([nx - r, ny, nx + r, ny + r * 1.7], fill=col)
+            d.line([nx + r, ny + r * 0.9, nx + r, ny - r * 2.3],
+                   fill=col, width=max(2, int(2.2 * s)))
+            d.line([nx + r, ny - r * 2.3, nx + r * 2.3, ny - r * 1.6],
+                   fill=col, width=max(2, int(2.2 * s)))
+
     return layer
 
 

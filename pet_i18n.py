@@ -334,6 +334,14 @@ EN = {
     "复制全文": "Copy all",
     "已复制": "Copied",
 
+    # ── 音乐 / 前台应用 ──
+    "这首好听": "I like this one", "跟着哼两句": "Humming along",
+    "♪": "♪", "这个节奏不错": "Good beat", "你也听这个": "You listen to this too",
+    "换歌了": "New song", "这首是？": "What's this one?",
+    "前奏好听": "Nice intro", "切歌了": "Track changed",
+    "你在开会，我安静": "You're in a meeting — I'll be quiet",
+    "不吵你": "Not disturbing you", "我待着": "I'll just be here",
+
     # ── 喂食 ──
     "喂她吃点什么": "Feed her something",
     "饱足": "Fullness",

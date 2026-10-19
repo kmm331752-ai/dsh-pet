@@ -30,6 +30,8 @@ import tkinter as tk
 from PIL import Image, ImageDraw
 from PIL import ImageTk                              # 皮肤预览要用
 
+import pet_activity
+import pet_music
 import pet_platform
 
 from pet_base import *
@@ -117,6 +119,17 @@ class PetApp:
         self.companion = None if (args.demo or args.force_state or args.no_companion) \
             else CompanionSource()
         self.in_companion = False
+        # 音乐 / 前台应用。**即使没有 DSH 也要建** —— 这正是"独立使用"的核心：
+        # 没有 DSH 时她是靠这两个源过日子的，不是干等着。
+        # --demo/--force-state 下不建（那是纯预览，不该受机器上放什么歌影响）。
+        self.music = None
+        self.activity = None
+        if not (args.demo or args.force_state):
+            self.music = pet_music.MusicSource()
+            self.activity = pet_activity.ActivitySource()
+            if self.companion is not None:
+                self.companion.attach_sources(music=self.music, activity=self.activity)
+            self.music.start()
 
         self.detail = bool(self.cfg.get("show_detail", False))
         self.privacy = bool(self.cfg.get("privacy", False))
@@ -1567,6 +1580,9 @@ class PetApp:
             return "zzz"
         if self.snap.state == "celebrating":
             return "note"
+        # 在听歌 → 飘音符。放在最后：交互反馈优先于"在听歌"这个背景状态。
+        if getattr(self.snap, "music", ""):
+            return "music"
         return ""
 
     def _apply_scale(self, new_scale: float) -> None:
@@ -1894,6 +1910,12 @@ class PetApp:
             pass
 
     def _quit(self):
+        # 音乐源是后台线程，退出时要停 —— 不然进程留着不退
+        if getattr(self, "music", None) is not None:
+            try:
+                self.music.stop()
+            except Exception:                            # noqa: BLE001
+                pass
         self._save_config()
         if self.companion is not None:
             self.companion.save()                        # 记下这一程
@@ -1965,9 +1987,21 @@ class PetApp:
                         self.companion.wake()
                 self.snap = snap
                 # 番茄钟 / 专注模式 / 等待提醒
+                # 音乐 / 前台应用：**无条件跑**，不管状态是谁驱动的。
+                # 挂在陪伴模式里的话，DSH 一忙就全失效（踩过）。
+                if self.companion is not None:
+                    self.companion.tick_sources(time.time())
+                    self.companion.decorate(self.snap, time.time())
+
                 self._pomodoro_tick(time.time())
                 if self.focus_mode:
                     self.snap.bubble = False                 # 专注时不冒泡
+                    if self.companion is not None:
+                        self.companion.bubble_until = 0.0
+                # 你在开会/写代码/看视频 → 她闭嘴（但状态和装饰照常）。
+                # 这是"知道你在干什么"的意义：之前她只能按空闲时间猜。
+                if getattr(self.snap, "quiet", False):
+                    self.snap.bubble = False
                     if self.companion is not None:
                         self.companion.bubble_until = 0.0
                 if self.snap.state == "waiting" and not self.focus_mode:

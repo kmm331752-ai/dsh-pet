@@ -34,6 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dsh_pet as P  # noqa: E402
 import pet_accessories as A  # noqa: E402
 import pet_base as B  # noqa: E402
+import pet_music as MU  # noqa: E402
+import pet_activity as AC  # noqa: E402
 import pet_i18n as I  # noqa: E402
 import pet_sources as S  # noqa: E402
 
@@ -138,6 +140,48 @@ class E2EBase(unittest.TestCase):
     def diff_box(a, b):
         from PIL import ImageChops
         return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox()
+
+
+
+class FakeMusic:
+    """假的音乐源。想让它放什么就放什么。"""
+
+    def __init__(self, np=None):
+        self.np = np
+        self.available = True
+        self.stopped = False
+        self.commands = []
+
+    def poll(self):
+        return self.np
+
+    def sessions(self):
+        return [self.np.app] if self.np else []
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self.stopped = True
+
+    def toggle_play(self):
+        self.commands.append("toggle")
+        return True
+
+
+class FakeActivity:
+    def __init__(self, act=None):
+        self.act = act
+        self.available = True
+
+    def poll(self):
+        return self.act
+
+
+def fake_track(title="歌", artist="人", playing=True):
+    return MU.NowPlaying(app="cloudmusic.exe", title=title, artist=artist,
+                         playing=playing, duration=200, position=10,
+                         changed_at=time.time())
 
 
 class TestHealthReminderEndToEnd(E2EBase):
@@ -681,6 +725,162 @@ class TestDetailEndToEnd(E2EBase):
             with self.subTest(detail=detail):
                 self.assertEqual(P.render_card(snap, detail).height,
                                  P.card_height(snap, detail))
+
+
+class TestMusicAndActivity(E2EBase):
+    """音乐 / 前台应用：走 _poll，**断言推给屏幕的像素**。
+
+    **为什么必须走 _poll 且断言像素**（AGENTS.md 规则 1）：直接调
+    `_music_tick()` 只能证明那个函数对。这个功能第一版挂在
+    `CompanionSource.poll()` 里，而 DSH 忙的时候走 watcher 分支 ——
+    那条路根本不经过它。实测现象：DSH 有任务在跑时，你在开会她照样冒泡。
+
+    **为什么注入假源**（规则 6）：真音乐源读的是这台机器上正在放什么，
+    测试依赖它换台机器就挂。假源想让它放什么就放什么。
+    """
+
+    def _app_with(self, track=None, activity=None):
+        app = self.make_app(force_state=None, no_companion=False)
+        fm = FakeMusic(track)
+        fa = FakeActivity(activity)
+        app.companion.attach_sources(music=fm, activity=fa)
+        app.music, app.activity = fm, fa
+        return app, fm, fa
+
+    @staticmethod
+    def _settle(app):
+        """跑一轮把"刚切歌"那次冒泡消费掉，再清干净。
+
+        顺序很重要：先 poll 一次（她这时会说"换歌了"，`_music_seen` 才记上），
+        再清气泡。反过来做的话下一轮 poll 仍会当成"切歌"再说一次 ——
+        因为 `_music_seen` 还是空的（实测踩到）。
+        """
+        app._poll()
+        app.companion.bubble_until = 0.0
+        app.companion.bubble = ""
+
+    # ── 像素层：音符真的画上去了吗 ──
+    def test_music_notes_reach_the_screen(self):
+        """有歌 / 没歌，推给屏幕的画布必须不一样。
+
+        这是这一层存在的意义：断言 `snap.music` 只能证明数据传到了，
+        证明不了音符画出来了。
+        """
+        app, fm, _ = self._app_with(fake_track("歌", "人"))
+        self._settle(app)
+        with_music = self.capture(app, ticks=2)
+
+        fm.np = None
+        without = self.capture(app, ticks=2)
+
+        self.assertIsNotNone(with_music)
+        self.assertIsNotNone(without)
+        box = self.diff_box(with_music, without)
+        self.assertIsNotNone(box, "有歌和没歌的画面一模一样 —— 音符没画上去")
+        # 音符在角色头顶那一带
+        self.assertLess(box[1], P.PET_AREA_H, f"差异出现在信息卡里：{box}")
+
+    def test_music_overlay_is_the_music_kind(self):
+        app, _, _ = self._app_with(fake_track("歌", "人"))
+        self._settle(app)
+        app._poll()
+        self.assertEqual(app._overlay_kind(time.time()), "music")
+
+    def test_title_shows_when_she_is_not_talking(self):
+        app, _, _ = self._app_with(fake_track("歌", "人"))
+        self._settle(app)
+        app._poll()
+        self.assertEqual(app.snap.music, "人 - 歌")
+        self.assertTrue(app.snap.detail_line.startswith("♪"), app.snap.detail_line)
+
+    def test_paused_music_is_not_listening(self):
+        app, _, _ = self._app_with(fake_track("歌", "人", playing=False))
+        app._poll()
+        self.assertEqual(app.snap.music, "")
+        self.assertNotEqual(app._overlay_kind(time.time()), "music")
+
+    def test_stopping_music_clears_it(self):
+        app, fm, _ = self._app_with(fake_track("歌", "人"))
+        app._poll()
+        fm.np = None
+        app._poll()
+        self.assertEqual(app.snap.music, "")
+        self.assertNotEqual(app._overlay_kind(time.time()), "music")
+
+    # ── 安静：知道你在干什么 ──
+    def test_meeting_makes_her_quiet(self):
+        app, _, _ = self._app_with(
+            fake_track("歌", "人"),
+            AC.Activity(process="wemeetapp.exe", category="meeting"))
+        app._poll()
+        self.assertTrue(app.snap.quiet, "开会该安静")
+        self.assertFalse(app.snap.bubble)
+        self.assertEqual(app.snap.music, "人 - 歌", "歌名不该丢")
+
+    def test_coding_video_game_are_quiet(self):
+        for proc, cat in (("Code.exe", "coding"), ("vlc.exe", "video"),
+                          ("steam.exe", "game")):
+            with self.subTest(category=cat):
+                app, _, _ = self._app_with(
+                    fake_track("歌", "人"),
+                    AC.Activity(process=proc, category=cat))
+                app._poll()
+                self.assertTrue(app.snap.quiet, f"{cat} 该安静")
+
+    def test_not_quiet_when_just_browsing(self):
+        app, _, _ = self._app_with(
+            None, AC.Activity(process="explorer.exe", category="other"))
+        app._poll()
+        self.assertFalse(app.snap.quiet)
+
+    def test_quiet_applies_even_when_dsh_is_busy(self):
+        """**这条是这个 bug 的回归测试。**
+
+        第一版把音乐/活动的 tick 挂在 `CompanionSource.poll()` 里，
+        而 DSH 忙时走 watcher 分支 —— 完全失效。
+        现在 `tick_sources()` 由 PetApp 无条件调，两条路都经过。
+        """
+        app, _, _ = self._app_with(
+            None, AC.Activity(process="Zoom.exe", category="meeting"))
+        # 造一个"DSH 正忙"的 snapshot，确认 quiet 仍然贴得上
+        app.snap = P.Snapshot(state="tools", title="正在干活", session_id="x")
+        app.companion.tick_sources(time.time())
+        app.companion.decorate(app.snap, time.time())
+        self.assertTrue(app.snap.quiet, "DSH 忙的时候也该安静")
+        self.assertEqual(app.snap.state, "tools", "状态不该被改掉")
+
+    def test_quiet_survives_a_real_poll_cycle(self):
+        """走完整 _poll（含 watcher 分支），确认 quiet 没被冲掉。"""
+        app, _, _ = self._app_with(
+            fake_track("歌", "人"),
+            AC.Activity(process="wemeetapp.exe", category="meeting"))
+        for _ in range(3):
+            app._poll()
+            app.root.update()
+        self.assertTrue(app.snap.quiet, f"state={app.snap.state} 时该安静")
+
+    # ── 健壮性 ──
+    def test_no_sources_does_not_crash(self):
+        """没装 winrt 的机器上音乐源不可用 —— 不能崩。"""
+        app = self.make_app(force_state=None, no_companion=False)
+        app.music, app.activity = None, None
+        app.companion.music, app.companion.activity = None, None
+        app._poll()
+        self.assertIsNotNone(app.snap)
+        self.assertEqual(app.snap.music, "")
+        self.assertFalse(app.snap.quiet)
+
+    def test_no_companion_does_not_crash(self):
+        """--no-companion 时也要能跑（那时没有 companion 可挂源）。"""
+        app = self.make_app(force_state=None, no_companion=True)
+        app._poll()
+        self.assertIsNotNone(app.snap)
+
+    def test_quit_stops_the_music_thread(self):
+        app, fm, _ = self._app_with(fake_track("歌", "人"))
+        app._poll()
+        app._quit()
+        self.assertTrue(fm.stopped, "退出时要停后台线程")
 
 
 if __name__ == "__main__":
