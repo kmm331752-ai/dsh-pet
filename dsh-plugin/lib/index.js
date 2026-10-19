@@ -431,8 +431,38 @@ export function apply(ctx, config) {
       out.ctxKeys = ctxKeys.slice(0, 200)
       for (const k of ctxKeys) names.add(k)
 
+      // 4) 关键：Cordis 的服务注册表。
+      //    第一版只看了 loader 条目和 ctx 的**可枚举键**，结果只有 8 个内部
+      //    名字（fiber / reflect / registry …）—— 因为服务不是可枚举属性，
+      //    是注册在 registry 里的。这里把注册表挖开。
+      const reg = safe(() => ctx.registry, null)
+      out.registryServices = null
+      if (reg) {
+        out.registryKeys = safe(() => Object.keys(reg).slice(0, 60), [])
+        const dump = safe(() => {
+          if (typeof reg.list === 'function') return reg.list()
+          if (reg instanceof Map) return [...reg.keys()]
+          if (reg.store instanceof Map) return [...reg.store.keys()]
+          if (reg.services instanceof Map) return [...reg.services.keys()]
+          if (reg._services instanceof Map) return [...reg._services.keys()]
+          if (reg.entries instanceof Map) return [...reg.entries.keys()]
+          return null
+        }, null)
+        if (Array.isArray(dump)) {
+          out.registryServices = dump
+            .map((x) => (typeof x === 'string' ? x : (x && (x.name || x.id)) || ''))
+            .filter((x) => typeof x === 'string' && x)
+            .slice(0, 400)
+          for (const n of out.registryServices) names.add(n)
+        } else {
+          // 形状不认识就把属性名报回来，下次照着改
+          out.registryShape = safe(
+            () => Object.getOwnPropertyNames(reg).slice(0, 40), [])
+        }
+      }
+
       out.names = [...names].sort()
-      // 4) 挑出和会话/任务相关的，这才是双向的关键
+      // 5) 挑出和会话/任务相关的，这才是双向的关键
       out.sessionLike = out.names.filter((n) => /session|task|turn|message|agent|conversation|history/i.test(n))
       sendJson(res, out)
     },
