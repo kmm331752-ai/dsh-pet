@@ -550,7 +550,16 @@ class PetApp:
 
     # -- 设置窗口 -----------------------------------------------------------
     def _open_settings(self) -> None:
+        """设置窗口。**四个 Tab。**
+
+        原来是扁平长列表，891px = 屏高的 82%，而且没有滚动 ——
+        小屏笔记本上底部的按钮点不到。分 Tab 之后每页都短。
+
+        顺带把「动画映射」「宠物库」两个按钮挪进它们所属的**外观**页：
+        原来它们挂在最下面，中间隔着「本地对话」和「相处记录」。
+        """
         tk = self.tk
+        from tkinter import ttk
         if getattr(self, "_settings_win", None) is not None:
             try:
                 self._settings_win.deiconify()
@@ -567,12 +576,16 @@ class PetApp:
         # 这些参数是给 grid() 的 —— 左对齐要写 sticky，不是 anchor。
         # 写成 anchor 会让第一个 Checkbutton 就抛 TclError，
         # 整个设置窗口建不起来（而且异常被 Tk 吞在回调里，看着就是"点了没反应"）。
-        pad = dict(padx=14, pady=6, sticky="w")
+        pad = dict(padx=14, pady=5, sticky="w")
+        WIDE = dict(padx=14, pady=4, sticky="ew")
 
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=12, pady=(12, 4))
+
+        # ══ 行为 ════════════════════════════════════════════════════════════
+        t_beh = tk.Frame(nb)
+        nb.add(t_beh, text=t("行为"))
         row = 0
-        tk.Label(win, text=t("行为"), font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 2))
-        row += 1
 
         v_comp = tk.BooleanVar(value=self.companion is not None)
         v_priv = tk.BooleanVar(value=self.privacy)
@@ -595,30 +608,41 @@ class PetApp:
             ok = set_autostart(v_auto.get())
             if not ok:
                 v_auto.set(autostart_enabled())
-                status.config(text=t("设置开机自启失败（见控制台）"), fg="#B93B37")
+                status.configure(text=t("设置开机自启失败（见控制台）"), fg="#B93B37")
 
-        tk.Checkbutton(win, text=t("陪伴模式（DSH 没任务时自己过日子）"), variable=v_comp,
-                       command=apply_companion).grid(row=row, column=0, columnspan=2, **pad)
+        tk.Checkbutton(t_beh, text=t("陪伴模式（DSH 没任务时自己过日子）"),
+                       variable=v_comp, command=apply_companion).grid(
+            row=row, column=0, columnspan=2, **pad)
         row += 1
-        tk.Checkbutton(win, text=t("开机自启"), variable=v_auto,
-                       command=apply_auto).grid(row=row, column=0, columnspan=2, **pad)
+        tk.Checkbutton(t_beh, text=t("任务完成时提示音"), variable=v_sound,
+                       command=apply_sound).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
-        tk.Checkbutton(win, text=t("隐私模式（隐藏标题与提示词）"), variable=v_priv,
+        tk.Checkbutton(t_beh, text=t("隐私模式（隐藏标题与提示词）"), variable=v_priv,
                        command=apply_priv).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
-        tk.Checkbutton(win, text=t("任务完成时提示音"), variable=v_sound,
-                       command=apply_sound).grid(row=row, column=0, columnspan=2, **pad)
+        tk.Checkbutton(t_beh, text=t("开机自启"), variable=v_auto,
+                       command=apply_auto).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
+        tk.Frame(t_beh, height=1, bg="#DDD").grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=8)
         row += 1
 
         # 语言。切换后要重建界面才生效 —— Tk 的菜单文字改不了，
         # 只能重建菜单；设置窗口自己重建一次即可。
-        lang_row = tk.Frame(win)
+        #
+        # **下拉框的值是显示用的 label，这里反查回 key。**
+        # 第一版传的是 LANGS 的 key，界面上显示 `auto` 而不是「跟随系统」——
+        # 和宠物库那个是一模一样的 bug（定义了 LANG_LABELS 却没用上）。
+        LANG_LABELS = [(k, pet_i18n.LANG_LABELS.get(k, k)) for k in pet_i18n.LANGS]
+        LANG_BY_LABEL = {lbl: k for k, lbl in LANG_LABELS}
+        lang_row = tk.Frame(t_beh)
         lang_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=6)
         tk.Label(lang_row, text=t("语言")).pack(side="left")
-        v_lang = tk.StringVar(value=self.lang_pref)
+        cur_lang = pet_i18n.LANG_LABELS.get(self.lang_pref, self.lang_pref)
+        v_lang = tk.StringVar(value=cur_lang)
 
         def apply_lang(*_a):
-            self.lang_pref = v_lang.get()
+            self.lang_pref = LANG_BY_LABEL.get(v_lang.get(), "auto")
             self.lang = pet_i18n.set_language(self.lang_pref)
             self._save_config()
             self._rebuild_menus()
@@ -627,50 +651,69 @@ class PetApp:
             self._settings_win = None
             self._open_settings()
 
-        om_lang = tk.OptionMenu(lang_row, v_lang, *pet_i18n.LANGS,
-                                command=apply_lang)
-        om_lang.pack(side="left", padx=(6, 0))
+        tk.OptionMenu(lang_row, v_lang, *[lbl for _, lbl in LANG_LABELS],
+                      command=apply_lang).pack(side="left", padx=(6, 0))
+        row += 1
+        tk.Label(t_beh, text=t("语言改了界面要重建一次。"), fg="#888").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14)
         row += 1
 
-        tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
-                                                sticky="ew", padx=14, pady=8)
-        row += 1
-        tk.Label(win, text=t("皮肤"), font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
-        row += 1
+        # ══ 外观 ════════════════════════════════════════════════════════════
+        t_look = tk.Frame(nb)
+        nb.add(t_look, text=t("外观"))
+        row = 0
 
+        skin_row = tk.Frame(t_look)
+        skin_row.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(8, 4))
+        tk.Label(skin_row, text=t("皮肤")).pack(side="left")
         v_skin = tk.StringVar(value=self.skin.name)
         labels = {s["id"]: s["display"] for s in discover_skins()}
-        om = tk.OptionMenu(win, v_skin, *labels.keys(),
+        # 同上：OptionMenu 显示的是 id 对应的 display，值还是 id
+        om = tk.OptionMenu(skin_row, v_skin, *labels.keys(),
                            command=lambda sid: self._switch_skin(sid))
-        om.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=4)
+        om.configure(width=18)
+        om.pack(side="left", padx=(6, 0))
         row += 1
 
-        tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
-                                                sticky="ew", padx=14, pady=8)
+        for text, cmd in ((t("动画映射（什么情况播什么）…"), self._open_mapping_window),
+                          (t("宠物库（从 petdex 找一只来养）…"), self._open_petdex),
+                          (t("皮肤预览（排一排点着换）…"), self._open_skin_preview)):
+            tk.Button(t_look, text=text, command=cmd).grid(
+                row=row, column=0, columnspan=2, **WIDE)
+            row += 1
+
+        # ══ 对话 ════════════════════════════════════════════════════════════
+        t_chat = tk.Frame(nb)
+        nb.add(t_chat, text=t("对话"))
+        row = 0
+
+        tk.Label(t_chat, text=t("本地对话（可选）"),
+                 font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(10, 2))
         row += 1
-        tk.Label(win, text=t("本地对话（可选）"), font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 2))
+        tk.Label(t_chat, text=t("接一个本地模型，就能和她说话。不填也能用。"),
+                 fg="#888", anchor="w").grid(row=row, column=0, columnspan=2,
+                                             sticky="w", padx=14)
         row += 1
 
         v_url = tk.StringVar(value=self.chat_url)
         v_model = tk.StringVar(value=self.chat_model)
-        tk.Label(win, text=t("地址（Ollama 默认 http://127.0.0.1:11434）"),
+        tk.Label(t_chat, text=t("地址（Ollama 默认 http://127.0.0.1:11434）"),
                  anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
-                                             sticky="w", padx=14)
+                                             sticky="w", padx=14, pady=(6, 0))
         row += 1
-        tk.Entry(win, textvariable=v_url, width=34).grid(
+        tk.Entry(t_chat, textvariable=v_url, width=34).grid(
             row=row, column=0, columnspan=2, sticky="ew", padx=14)
         row += 1
-        tk.Label(win, text=t("模型名（Ollama 用 ollama list 看）"),
+        tk.Label(t_chat, text=t("模型名（Ollama 用 ollama list 看）"),
                  anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
                                              sticky="w", padx=14, pady=(4, 0))
         row += 1
-        tk.Entry(win, textvariable=v_model, width=34).grid(
+        tk.Entry(t_chat, textvariable=v_model, width=34).grid(
             row=row, column=0, columnspan=2, sticky="ew", padx=14)
         row += 1
 
-        chat_status = tk.Label(win, text="", anchor="w", fg="#666", wraplength=300,
+        chat_status = tk.Label(t_chat, text="", anchor="w", fg="#666", wraplength=300,
                                justify="left")
         chat_status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 0))
         row += 1
@@ -709,19 +752,22 @@ class PetApp:
 
             threading.Thread(target=work, name="dsh-pet-probe", daemon=True).start()
 
-        chatbar = tk.Frame(win)
-        chatbar.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
+        chatbar = tk.Frame(t_chat)
+        chatbar.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 6))
         tk.Button(chatbar, text=t("保存"), command=save_chat).pack(side="left")
         tk.Button(chatbar, text=t("测试连接"), command=probe).pack(side="left", padx=6)
         tk.Button(chatbar, text=t("和大肥鱼说话…"),
                   command=self._open_chat).pack(side="left")
         row += 1
 
-        tk.Frame(win, height=1, bg="#DDD").grid(row=row, column=0, columnspan=2,
-                                                sticky="ew", padx=14, pady=8)
-        row += 1
-        tk.Label(win, text=t("相处记录"), font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
+        # ══ 关于 ════════════════════════════════════════════════════════════
+        t_about = tk.Frame(nb)
+        nb.add(t_about, text=t("关于"))
+        row = 0
+
+        tk.Label(t_about, text=t("相处记录"),
+                 font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(10, 2))
         row += 1
 
         m = self.companion.mood if self.companion else Mood()
@@ -729,7 +775,7 @@ class PetApp:
                 f"被戳 {m.pokes} 次 · 被拖 {m.drags} 次 · 被喂 {m.feeds} 次\n"
                 f"亲密度 {m.affection * 100:.0f}% · 精力 {m.energy * 100:.0f}%\n"
                 f"{m.schedule_text()}")
-        tk.Label(win, text=info, justify="left").grid(
+        tk.Label(t_about, text=info, justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 6))
         row += 1
 
@@ -737,7 +783,7 @@ class PetApp:
             dx, dy = default_position()
             self.root.geometry(f"{WIN_W}x{WIN_H}+{dx}+{dy}")
             self._save_config()
-            status.config(text=t("位置已复位"), fg="#2E9E63")
+            status.configure(text=t("位置已复位"), fg="#2E9E63")
 
         def forget_me():
             if self.companion is not None:
@@ -748,31 +794,30 @@ class PetApp:
             self._settings_win = None
             self._open_settings()
 
-        btns = tk.Frame(win)
+        btns = tk.Frame(t_about)
         btns.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 6))
         tk.Button(btns, text=t("位置复位"), command=reset_pos).pack(side="left")
         tk.Button(btns, text=t("重置相处记录"), command=forget_me).pack(side="left", padx=6)
         tk.Button(btns, text=t("出错日志"), command=self._show_error_log).pack(side="left")
         row += 1
-        tk.Button(win, text=t("动画映射（什么情况播什么）…"),
-                  command=self._open_mapping_window).grid(
-            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
+
+        tk.Frame(t_about, height=1, bg="#DDD").grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=8)
         row += 1
-        tk.Button(win, text=t("宠物库（从 petdex 找一只来养）…"),
-                  command=self._open_petdex).grid(
-            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 6))
+        tk.Label(t_about, text=t("热键"), font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 2))
+        row += 1
+        tk.Label(t_about, justify="left", fg="#777",
+                 text=t("Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置 · +M 播放暂停\n"
+                        "滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
         row += 1
 
-        status = tk.Label(win, text="", fg="#666")
-        status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
-        row += 1
-        tk.Label(win, text=t("热键：Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置\n滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜"),
-                 justify="left", fg="#777").grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 0))
-        row += 1
+        # ══ 底部条：状态 + 关闭（任何 Tab 下都看得见）════════════════════════
+        status = tk.Label(win, text="", fg="#666", anchor="w")
+        status.pack(fill="x", padx=14)
         tk.Button(win, text=t("关闭"), width=10, command=lambda: (
-            win.destroy(), setattr(self, "_settings_win", None))).grid(
-            row=row, column=0, columnspan=2, pady=(6, 14))
+            win.destroy(), setattr(self, "_settings_win", None))).pack(pady=(4, 12))
 
     # -- 托盘图标 -----------------------------------------------------------
     def _start_tray(self) -> None:

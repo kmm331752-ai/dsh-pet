@@ -1739,5 +1739,133 @@ class TestNewInteractions(E2EBase):
         self.assertIsNotNone(im.getbbox(), "相位 0 什么都没画")
 
 
+class TestSettingsLayout(E2EBase):
+    """设置窗口的排布 —— **四个 Tab**，而且小屏放得下。
+
+    原来是扁平长列表：**891px = 屏高的 82%**，而且**没有滚动** ——
+    768px 的笔记本上底部的「关闭」和热键说明**点不到**。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._lang_before = I.current()
+        self.write_config(lang="zh", skin="openpets")
+
+    def tearDown(self):
+        I.set_language(self._lang_before)
+        super().tearDown()
+
+    @staticmethod
+    def _widgets(w, cls):
+        out = []
+
+        def walk(x):
+            for c in x.winfo_children():
+                try:
+                    if c.winfo_class() == cls:
+                        out.append(c)
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(w)
+        return out
+
+    def _open(self):
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        app._open_settings()
+        app.root.update()
+        win = app._settings_win
+        self.assertIsNotNone(win, "设置窗口没建起来")
+        nbs = self._widgets(win, "TNotebook")
+        self.assertEqual(len(nbs), 1, "没有 Notebook")
+        return app, win, nbs[0]
+
+    def test_four_tabs_with_the_right_names(self):
+        _app, _win, nb = self._open()
+        names = [nb.tab(i, "text") for i in range(nb.index("end"))]
+        self.assertEqual(names, ["行为", "外观", "对话", "关于"], str(names))
+
+    def test_window_fits_a_small_screen(self):
+        """**这是重排的主要理由。**
+
+        原来 891px —— 768px 的笔记本上放不下，而且没有滚动。
+        """
+        app, win, _nb = self._open()
+        win.update_idletasks()
+        h = win.winfo_height()
+        self.assertLess(h, 891, f"没变矮：{h}px")
+        self.assertLessEqual(h, 768, f"{h}px，768px 的屏幕放不下")
+
+    def test_language_dropdown_shows_labels_not_keys(self):
+        """语言下拉框要显示 **label**，不是 `LANGS` 里的 key。
+
+        和宠物库那个是**一模一样的 bug**：定义了 `LANG_LABELS` 却把
+        `LANGS` 的 key 传给了 OptionMenu，界面上显示 `auto`。
+
+        **不能断言具体是哪个 label** —— `setUp` 里写了 `lang="zh"`，
+        正确显示就是「中文」。要断言的是"它在 label 集合里、不在 key 集合里"。
+        （第一版写死断言「跟随系统」，于是挂在一个**正确**的行为上。）
+        """
+        _app, win, nb = self._open()
+        beh = nb.winfo_children()[0]
+        oms = self._widgets(beh, "Menubutton")
+        self.assertEqual(len(oms), 1, f"行为页有 {len(oms)} 个下拉框")
+        vn = str(oms[0].cget("textvariable"))
+        val = win.getvar(vn)
+        self.assertIn(val, set(I.LANG_LABELS.values()),
+                      f"显示的是 {val!r} —— 那是 key 吧")
+        self.assertNotIn(val, set(I.LANGS), f"显示的是 key {val!r}，该是 label")
+
+    def test_appearance_tab_has_the_skin_buttons(self):
+        """**按钮归位** —— 它们属于「皮肤」，原来挂在最下面隔了两个区块。"""
+        _app, _win, nb = self._open()
+        look = nb.winfo_children()[1]
+        texts = [str(b.cget("text")) for b in self._widgets(look, "Button")]
+        for want in ("动画映射", "宠物库", "皮肤预览"):
+            with self.subTest(button=want):
+                self.assertTrue(any(want in x for x in texts), str(texts))
+        self.assertTrue(self._widgets(look, "Menubutton"), "外观页没有皮肤下拉框")
+
+    def test_about_tab_has_the_records_buttons(self):
+        _app, _win, nb = self._open()
+        about = nb.winfo_children()[3]
+        texts = [str(b.cget("text")) for b in self._widgets(about, "Button")]
+        for want in ("位置复位", "重置相处记录", "出错日志"):
+            with self.subTest(button=want):
+                self.assertTrue(any(want in x for x in texts), str(texts))
+
+    def test_status_and_close_live_outside_the_tabs(self):
+        """状态提示和「关闭」在**底部条**上 —— 任何 Tab 下都看得见。
+
+        判据是"**不在 Notebook 的页里**"。第一版写成遍历顶层子控件再断言
+        "每个都不是 Notebook"，而 Notebook 自己就在顶层 —— 必然失败，
+        是测试写错了，不是代码错了。
+        """
+        _app, win, nb = self._open()
+        inside = set(nb.winfo_children())                # 四个 Tab 页
+        outside = [c for c in win.winfo_children() if c not in inside and c is not nb]
+
+        btns = [str(c.cget("text")) for c in outside if c.winfo_class() == "Button"]
+        self.assertTrue(any("关闭" in x for x in btns), f"关闭不在底部：{btns}")
+        labels = [c for c in outside if c.winfo_class() == "Label"]
+        self.assertTrue(labels, "底部没有状态标签")
+
+    def test_nothing_was_lost(self):
+        """重排不能弄丢功能。"""
+        _app, _win, nb = self._open()
+        beh, look, chat, about = nb.winfo_children()[:4]
+        self.assertEqual(len(self._widgets(beh, "Checkbutton")), 4,
+                         "行为页该有 4 个复选框")
+        self.assertEqual(len(self._widgets(chat, "Entry")), 2,
+                         "对话页该有 2 个输入框")
+        chat_btns = [str(b.cget("text")) for b in self._widgets(chat, "Button")]
+        self.assertEqual(len(chat_btns), 3, str(chat_btns))
+        # 相处记录还在
+        texts = [str(x.cget("text")) for x in self._widgets(about, "Label")]
+        self.assertTrue(any("相处记录" in x for x in texts), str(texts[:6]))
+        self.assertTrue(any("热键" in x for x in texts), str(texts[:8]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

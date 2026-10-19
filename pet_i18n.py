@@ -97,6 +97,23 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
+    "外观":
+        "Appearance",
+    "对话":
+        "Chat",
+    "关于":
+        "About",
+    "语言改了界面要重建一次。":
+        "Changing the language rebuilds the window.",
+    "皮肤预览（排一排点着换）…":
+        "Skin preview…",
+    "接一个本地模型，就能和她说话。不填也能用。":
+        "Connect a local model to talk to her. Optional.",
+    "热键":
+        "Hotkeys",
+    "Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置 · +M 播放暂停\n滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜":
+        "Ctrl+Alt+P show/hide · +F feed · +S settings · +M play/pause\nScroll to resize · double-click opens this window · shake/hold for surprises",
+
     "状态 → 动画":
         "State → animation",
     "动画本身":
@@ -394,12 +411,6 @@ EN = {
     "喝口水吧": "Have some water",
     "该补水了": "Time to hydrate",
     "杯子空了吧": "Your cup's probably empty",
-
-    # ── 设置窗口底部的热键说明 ──
-    "热键：Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置\n"
-    "滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜":
-        "Hotkeys: Ctrl+Alt+P show/hide · +F feed · +D focus · +H hide · +S settings\n"
-        "Wheel to zoom · double-click opens this · try shaking or long-pressing her",
 
     # ── 状态行里拼接的片段 ──
     "个任务进行中": "tasks running",
