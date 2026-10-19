@@ -8,6 +8,12 @@
 而当你没在跑任务、或者根本没开 DSH 的时候 —— 她会自己溜达、犯困、打盹、睡着，
 你一动键盘鼠标她就醒。你还能喂她、摸她，她会记住你。
 
+![她会转头看你](preview/demo-gaze.gif)
+
+![她的一天](preview/demo.gif)
+
+<sub>上面两段是**真渲染的帧**拼的（`tools/make_demo_gif.py`），不是画的示意图。</sub>
+
 ![十三种状态](preview/states-13.png)
 
 单文件 Python + Pillow，没有网络请求，没有遥测。它只读 DSH 自己写的会话文件，
