@@ -1321,13 +1321,14 @@ class PetApp:
                   command=win.destroy).pack(pady=(0, 12))
 
     def _open_mapping_window(self) -> None:
-        """「什么情况播什么」的编辑界面。
+        """「什么情况播什么」的编辑界面。**两个 Tab。**
 
         只对**图集皮肤**有意义 —— clawd 主题的映射写在它自己的
         `theme.json` 里（states 段，值是文件名），不走这套。内置的大肥鱼
         是程序化画的，也没有可配置的行。两种情况下给一句说明，不是报错。
         """
         tk = self.tk
+        from tkinter import ttk
         if getattr(self, "_mapping_win", None) is not None:
             try:
                 self._mapping_win.deiconify()
@@ -1357,25 +1358,29 @@ class PetApp:
         tk.Label(head, text=t("改了立刻生效，存在 pet_config.json 里。"),
                  fg="#777").pack(anchor="w")
 
-        body = tk.Frame(win)
-        body.pack(fill="both", expand=True, padx=14, pady=8)
-        tk.Label(body, text=t("状态"), width=10, anchor="w",
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=14, pady=(6, 4))
+
+        anim_meta = pet_mapping.animation_choices()
+        anim_ids = [a["id"] for a in anim_meta]
+        anim_desc = {a["id"]: a["desc"] for a in anim_meta}
+        anim_label = {a["id"]: a["label"] for a in anim_meta}
+        builtin_states = dict(pet_mapping.DEFAULT_STATE_ANIMATION)
+        builtin_anims = {k: dict(v) for k, v in pet_mapping.DEFAULT_ANIMATIONS.items()}
+        max_rows = skin.sheet.size[1] // pet_render.ATLAS_CH
+
+        # ══ Tab 1：状态 → 动画 ══════════════════════════════════════════════
+        tab1 = tk.Frame(nb)
+        nb.add(tab1, text=t("状态 → 动画"))
+        tk.Label(tab1, text=t("状态"), width=10, anchor="w",
                  font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Label(body, text=t("播哪个动画"), width=12, anchor="w",
+        tk.Label(tab1, text=t("播哪个动画"), width=12, anchor="w",
                  font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=1, sticky="w")
-        tk.Label(body, text=t("说明"), anchor="w",
+        tk.Label(tab1, text=t("说明"), anchor="w",
                  font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=2, sticky="w")
 
-        anim_ids = [a["id"] for a in pet_mapping.animation_choices()]
-        anim_desc = {a["id"]: a["desc"] for a in pet_mapping.animation_choices()}
-        anim_label = {a["id"]: a["label"] for a in pet_mapping.animation_choices()}
-
-        # 当前值 = 皮肤 + 用户配置合并之后的
-        cur = {s["id"]: skin.mapping.states.get(s["id"], "idle")
-               for s in pet_mapping.state_choices()}
-        # 记下**出厂默认**，用来显示"改过没有"
-        builtin = dict(pet_mapping.DEFAULT_STATE_ANIMATION)
-
+        cur = {st["id"]: skin.mapping.states.get(st["id"], "idle")
+               for st in pet_mapping.state_choices()}
         vars_map: dict = {}
         desc_labels: dict = {}
         changed_labels: dict = {}
@@ -1384,57 +1389,139 @@ class PetApp:
             """改了下拉框就更新右边那列说明。"""
             a = vars_map[state].get()
             desc_labels[state].configure(text=anim_desc.get(a, ""))
-            same = builtin.get(state) == a
+            same = builtin_states.get(state) == a
             changed_labels[state].configure(
                 text="" if same else t("已改"),
                 fg="#C77B2E" if not same else "#777")
 
-        for i, s in enumerate(pet_mapping.state_choices(), start=1):
-            sid = s["id"]
-            tk.Label(body, text=s["label"], anchor="w").grid(
+        for i, st in enumerate(pet_mapping.state_choices(), start=1):
+            sid = st["id"]
+            tk.Label(tab1, text=st["label"], anchor="w").grid(
                 row=i, column=0, sticky="w", pady=2)
             v = tk.StringVar(value=cur.get(sid, "idle"))
             vars_map[sid] = v
-            # 下拉框显示中文 label，但值还是动画 id
-            om = tk.OptionMenu(body, v, *anim_ids,
-                               command=lambda _a, st=sid: refresh_desc(st))
+            om = tk.OptionMenu(tab1, v, *anim_ids,
+                               command=lambda _a, s2=sid: refresh_desc(s2))
             om.configure(width=10)
             om.grid(row=i, column=1, sticky="w", padx=(0, 8))
-            dl = tk.Label(body, text="", anchor="w", fg="#666", width=22)
+            dl = tk.Label(tab1, text="", anchor="w", fg="#666", width=22)
             dl.grid(row=i, column=2, sticky="w")
             desc_labels[sid] = dl
-            cl = tk.Label(body, text="", anchor="w", fg="#777", width=5)
+            cl = tk.Label(tab1, text="", anchor="w", fg="#777", width=5)
             cl.grid(row=i, column=3, sticky="w")
             changed_labels[sid] = cl
             refresh_desc(sid)
 
+        # ══ Tab 2：动画本身 ════════════════════════════════════════════════
+        tab2 = tk.Frame(nb)
+        nb.add(tab2, text=t("动画本身"))
+        tk.Label(tab2, text=t("动画"), width=12, anchor="w",
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(tab2, text=t("哪一行"), anchor="w",
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=1, sticky="w")
+        tk.Label(tab2, text=t("多久（毫秒）"), anchor="w",
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=2, sticky="w")
+        tk.Label(tab2, text=t("循环"), anchor="w",
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(row=0, column=3, sticky="w")
+        tk.Label(tab2, text=t("整段动画的时长，按帧数均分。「让待机慢一点」就改这里。"),
+                 fg="#777", anchor="w").grid(row=1, column=0, columnspan=5,
+                                             sticky="w", pady=(0, 4))
+
+        anim_vars: dict = {}
+        anim_changed: dict = {}
+
+        def refresh_anim(name: str):
+            row_v, dur_v, loop_v = anim_vars[name]
+            b = builtin_anims.get(name, {})
+            try:
+                same = (int(row_v.get()) == b.get("row")
+                        and int(dur_v.get()) == b.get("duration_ms")
+                        and bool(loop_v.get()) == bool(b.get("loop", True)))
+            except (TypeError, ValueError):
+                same = False
+            anim_changed[name].configure(text="" if same else t("已改"),
+                                         fg="#C77B2E" if not same else "#777")
+
+        for i, a in enumerate(anim_meta, start=2):
+            name = a["id"]
+            spec = skin.mapping.animations.get(name, builtin_anims.get(name, {}))
+            tk.Label(tab2, text=a["label"], anchor="w").grid(
+                row=i, column=0, sticky="w", pady=2)
+            rv = tk.StringVar(value=str(spec.get("row", 0)))
+            dv = tk.StringVar(value=str(spec.get("duration_ms", 1000)))
+            lv = tk.BooleanVar(value=bool(spec.get("loop", True)))
+            anim_vars[name] = (rv, dv, lv)
+            # 行号用 Spinbox 限制在图上有的行里 —— 越界的配置会被
+            # pet_mapping.parse 拒掉，但让用户根本输不进去更好
+            tk.Spinbox(tab2, from_=0, to=max(0, max_rows - 1), width=4,
+                       textvariable=rv, command=lambda n=name: refresh_anim(n)
+                       ).grid(row=i, column=1, sticky="w", padx=(0, 8))
+            e = tk.Entry(tab2, textvariable=dv, width=7)
+            e.grid(row=i, column=2, sticky="w", padx=(0, 8))
+            e.bind("<KeyRelease>", lambda _e, n=name: refresh_anim(n))
+            tk.Checkbutton(tab2, variable=lv,
+                           command=lambda n=name: refresh_anim(n)
+                           ).grid(row=i, column=3, sticky="w")
+            cl = tk.Label(tab2, text="", anchor="w", fg="#777", width=5)
+            cl.grid(row=i, column=4, sticky="w")
+            anim_changed[name] = cl
+            refresh_anim(name)
+
         warn = self.mapping_warnings()
         if warn:
             tk.Label(win, text="⚠ " + t("有配置被忽略了：") + "；".join(warn[:3]),
-                     fg="#B93B37", wraplength=420, justify="left").pack(
+                     fg="#B93B37", wraplength=460, justify="left").pack(
                 anchor="w", padx=14)
 
         status = tk.Label(win, text="", fg="#666")
         status.pack(anchor="w", padx=14, pady=(4, 0))
 
-        def apply_and_close():
-            """写进 pet_config.json 并立刻生效。"""
+        def collect() -> dict:
+            """收集**和出厂默认不一样**的那些。
+
+            只存改过的：15+9 项全写进配置的话，以后我们改默认值就再也
+            传不到用户那儿了 —— 他的配置里那一项永远盖着。
+            """
+            cfg: dict = {}
             states = {sid: v.get() for sid, v in vars_map.items()
-                      if v.get() != builtin.get(sid)}      # 只存改过的
-            cfg = dict(self.cfg.get("mapping") or {})
+                      if v.get() != builtin_states.get(sid)}
             if states:
                 cfg["states"] = states
-            else:
-                cfg.pop("states", None)
-            if cfg:
-                self.cfg["mapping"] = cfg
+            anims = {}
+            for name, (rv, dv, lv) in anim_vars.items():
+                b = builtin_anims.get(name, {})
+                try:
+                    row_i, dur_i = int(rv.get()), int(dv.get())
+                except (TypeError, ValueError):
+                    continue                             # 输入框里是半截数字
+                if not (0 <= row_i < max_rows) or dur_i <= 0:
+                    continue
+                if (row_i == b.get("row") and dur_i == b.get("duration_ms")
+                        and bool(lv.get()) == bool(b.get("loop", True))):
+                    continue                             # 没改
+                anims[name] = {"row": row_i, "durationMs": dur_i,
+                               "loop": bool(lv.get())}
+            if anims:
+                cfg["animations"] = anims
+            return cfg
+
+        def apply_and_close():
+            """写进 pet_config.json 并立刻生效。"""
+            cfg = collect()
+            keep = dict(self.cfg.get("mapping") or {})
+            keep.pop("states", None)
+            keep.pop("animations", None)
+            keep.update(cfg)                             # slowdown 之类要留着
+            if keep:
+                self.cfg["mapping"] = keep
             else:
                 self.cfg.pop("mapping", None)
-            # 重新套一遍：从皮肤的原始映射开始，再盖用户配置。
-            # 不能只改 skin.mapping.states —— 那样"恢复默认"就回不去了。
+            # 重新套一遍：从皮肤的**原始清单**开始，再盖用户配置。
+            # 不能只改 skin.mapping.states —— 那样"恢复默认"就没有干净的
+            # 起点可比了（你改回默认值，它和"没改过"在内存里长得一样，
+            # 但配置里还留着一条）。
             self.skin.mapping = pet_mapping.load_from_manifest(
-                getattr(self.skin, "manifest", None),
-                max_rows=self.skin.sheet.size[1] // pet_render.ATLAS_CH)
+                getattr(self.skin, "manifest", None), max_rows=max_rows)
             self._apply_user_mapping()
             self._save_config()
             self._ensure_state(self.snap.state)
@@ -1443,8 +1530,14 @@ class PetApp:
 
         def restore_defaults():
             for sid, v in vars_map.items():
-                v.set(builtin.get(sid, "idle"))
+                v.set(builtin_states.get(sid, "idle"))
                 refresh_desc(sid)
+            for name, (rv, dv, lv) in anim_vars.items():
+                b = builtin_anims.get(name, {})
+                rv.set(str(b.get("row", 0)))
+                dv.set(str(b.get("duration_ms", 1000)))
+                lv.set(bool(b.get("loop", True)))
+                refresh_anim(name)
             status.configure(text=t("已恢复默认（还要点保存）"), fg="#C77B2E")
 
         def close():

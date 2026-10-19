@@ -1349,6 +1349,22 @@ class TestMappingWindow(E2EBase):
         walk(win)
         return out
 
+    @staticmethod
+    def _widgets(w, cls):
+        out = []
+
+        def walk(x):
+            for c in x.winfo_children():
+                try:
+                    if c.winfo_class() == cls:
+                        out.append(c)
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(w)
+        return out
+
     def _set_state(self, win, want_from, to):
         """把当前值是 `want_from` 的那个下拉框改成 `to`。返回改了几个。"""
         n = 0
@@ -1453,6 +1469,142 @@ class TestMappingWindow(E2EBase):
         self.assertEqual(app.skin.mapping.row_for("thinking"), 8, "没恢复回去")
         self.assertNotIn("states", self.read_config().get("mapping") or {},
                          "配置里还留着 states")
+
+    @staticmethod
+    def _tabs(win):
+        """Notebook 的两个 Tab 页。"""
+        out = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                try:
+                    if c.winfo_class() == "TNotebook":
+                        out.extend(c.winfo_children())
+                except Exception:                        # noqa: BLE001
+                    pass
+                walk(c)
+
+        walk(win)
+        return out
+
+    def test_animation_tab_exists(self):
+        """**两个 Tab** —— 状态 15 行 + 动画 9 行排一起会高到放不下。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        tabs = self._tabs(win)
+        self.assertEqual(len(tabs), 2, f"Tab 数不对：{len(tabs)}")
+        self.assertEqual(len(self._widgets(tabs[0], "Menubutton")), 15,
+                         "状态那页该有 15 个下拉框")
+        self.assertEqual(len(self._widgets(tabs[1], "Spinbox")), 9,
+                         "动画那页该有 9 个行号框")
+        self.assertEqual(len(self._widgets(tabs[1], "Entry")), 9,
+                         "动画那页该有 9 个时长框")
+
+    def test_making_idle_slower(self):
+        """**「让待机慢一点」就是为这个加的。**
+
+        改之前：只能在 pet_config.json 里手写 `animations.idle.durationMs`。
+        """
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        self.assertEqual(app.skin.mapping.animations["idle"]["duration_ms"], 5500)
+        win = self._open_via_settings(app)
+        tabs = self._tabs(win)
+
+        hit = None
+        for e in self._widgets(tabs[1], "Entry"):
+            vn = str(e.cget("textvariable"))
+            if vn and win.getvar(vn) == "5500":
+                hit = vn
+                break
+        self.assertIsNotNone(hit, "没找到 idle 的时长框")
+        win.setvar(hit, "11000")
+        app.root.update()
+        dict(self._buttons(win))["保存"].invoke()
+        app.root.update()
+
+        self.assertEqual(app.skin.mapping.animations["idle"]["duration_ms"], 11000)
+        cfg = self.read_config()
+        self.assertEqual(
+            cfg["mapping"]["animations"]["idle"]["durationMs"], 11000)
+        self.assertEqual(set(cfg["mapping"]["animations"]), {"idle"},
+                         "只该存改过的")
+        # 帧时长真的变慢了
+        fr = app.skin.frames("idle")
+        self.assertGreater(fr[0][1], 1500, f"{fr[0][1]} ms/帧，没变慢")
+
+    def test_both_tabs_save_together(self):
+        """两个 Tab 各改一处，保存后配置里两块都在。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        tabs = self._tabs(win)
+        self._set_state(tabs[0], "review", "idle")
+        for sp in self._widgets(tabs[1], "Spinbox"):
+            vn = str(sp.cget("textvariable"))
+            if vn and win.getvar(vn) == "5":
+                win.setvar(vn, "7")
+                break
+        app.root.update()
+        dict(self._buttons(win))["保存"].invoke()
+        app.root.update()
+        m = self.read_config().get("mapping", {})
+        self.assertIn("states", m)
+        self.assertIn("animations", m)
+        self.assertEqual(m["states"]["thinking"], "idle")
+        self.assertTrue(any(v.get("row") == 7 for v in m["animations"].values()),
+                        str(m["animations"]))
+
+    def test_restore_defaults_covers_both_tabs(self):
+        """「恢复默认」要把两个 Tab 都还原，配置里两块都清掉。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        tabs = self._tabs(win)
+        self._set_state(tabs[0], "review", "idle")
+        for e in self._widgets(tabs[1], "Entry"):
+            vn = str(e.cget("textvariable"))
+            if vn and win.getvar(vn) == "5500":
+                win.setvar(vn, "9999")
+                break
+        app.root.update()
+        dict(self._buttons(win))["保存"].invoke()
+        app.root.update()
+        self.assertEqual(app.skin.mapping.animations["idle"]["duration_ms"], 9999)
+
+        app._open_mapping_window()
+        app.root.update()
+        win2 = app._mapping_win
+        btns = dict(self._buttons(win2))
+        btns["恢复默认"].invoke()
+        app.root.update()
+        btns["保存"].invoke()
+        app.root.update()
+        self.assertEqual(app.skin.mapping.animations["idle"]["duration_ms"], 5500)
+        self.assertEqual(app.skin.mapping.row_for("thinking"), 8)
+        m = self.read_config().get("mapping") or {}
+        self.assertNotIn("states", m)
+        self.assertNotIn("animations", m)
+
+    def test_half_typed_number_does_not_crash(self):
+        """输入框里是半截数字（用户正在打字）时点保存 —— 不能炸。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        tabs = self._tabs(win)
+        for e in self._widgets(tabs[1], "Entry"):
+            vn = str(e.cget("textvariable"))
+            if vn and win.getvar(vn) == "5500":
+                win.setvar(vn, "abc")
+                break
+        app.root.update()
+        dict(self._buttons(win))["保存"].invoke()
+        app.root.update()
+        self.assertEqual(app.skin.mapping.animations["idle"]["duration_ms"], 5500,
+                         "坏输入该被跳过，用默认")
+
+    def test_animation_tab_is_reachable_from_settings(self):
+        """整条路：设置窗口 → 按钮 → 窗口 → 两个 Tab。"""
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        win = self._open_via_settings(app)
+        self.assertIsNotNone(win)
+        self.assertEqual(len(self._tabs(win)), 2)
 
     def test_builtin_skin_explains_instead_of_crashing(self):
         """内置皮肤没有可配置的行 —— 要给说明，不是报错。"""

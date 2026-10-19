@@ -97,6 +97,21 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
+    "状态 → 动画":
+        "State → animation",
+    "动画本身":
+        "Animations",
+    "动画":
+        "Animation",
+    "哪一行":
+        "Row",
+    "多久（毫秒）":
+        "Duration (ms)",
+    "循环":
+        "Loop",
+    "整段动画的时长，按帧数均分。「让待机慢一点」就改这里。":
+        "Total length of the animation, split evenly across frames. Make idle slower here.",
+
     "！！":
         "!!",
     "吓我一跳":
