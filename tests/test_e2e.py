@@ -1288,7 +1288,25 @@ class TestMappingWindow(E2EBase):
 
     规则 1 说"测路径不测零件"：所以这里不直接调 `_open_mapping_window()`，
     而是先找到设置窗口上那个按钮 `invoke()` 它 —— 用户就是这么进来的。
+
+    **语言要钉死（规则 6）。** 按钮文字是 `t("动画映射…")`，而 CI runner
+    是英文环境 —— 搜 `"映射"` 搜不到，6 条全挂，本地却全过。
+    AGENTS.md 规则 6 的表格里正好记着这一条（"冒烟测试断言 '安装' in label，
+    CI runner 是英文环境就挂"），我还是又踩了一遍。
     """
+
+    def setUp(self):
+        super().setUp()
+        self._lang_before = I.current()
+        # **配置里就要写 lang。** 只调 `I.set_language("zh")` 没用 ——
+        # `PetApp.__init__` 会自己按 `cfg["lang"]` 再设一遍，配置里没有就
+        # 回落 "auto"，CI runner 上就是英文。
+        # （第一版只设了 I，本地过、CI 6 条全挂。）
+        self.write_config(lang="zh", skin="openpets")
+
+    def tearDown(self):
+        I.set_language(self._lang_before)
+        super().tearDown()
 
     def _open_via_settings(self, app):
         """走用户那条路：设置窗口 → 点按钮 → 映射窗口。"""
@@ -1447,7 +1465,9 @@ class TestMappingWindow(E2EBase):
 
     def test_bad_config_shows_a_warning(self):
         """被忽略的配置项要在界面上看得见。"""
-        self.write_config(mapping={"states": {"thinking": "不存在的动画"}})
+        # lang 要跟着写 —— 这里再 write_config 一次会把 setUp 那份冲掉
+        self.write_config(lang="zh", skin="openpets",
+                          mapping={"states": {"thinking": "不存在的动画"}})
         app = self.make_app(force_state=None, no_companion=False, skin="openpets")
         self.assertTrue(app.mapping_warnings(), "没记下警告")
         win = self._open_via_settings(app)
