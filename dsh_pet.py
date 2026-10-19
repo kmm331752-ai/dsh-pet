@@ -23,6 +23,7 @@ import os
 import random
 import sys
 import threading
+import webbrowser
 import time
 
 import tkinter as tk
@@ -33,6 +34,7 @@ from PIL import ImageTk                              # 皮肤预览要用
 import pet_activity
 import pet_mapping
 import pet_music
+import pet_petdex
 import pet_platform
 
 from pet_base import *
@@ -199,6 +201,16 @@ class PetApp:
         # （_drop_job 就是这么坑掉「等待提醒」的）。
         self._settings_win = None
         self._mapping_win = None
+        self._petdex_win = None
+        # 交互装饰的到期时间。规则 2：在 __init__ 里建，不要"用到才建"。
+        self.stretch_until = 0.0
+        self.munch_until = 0.0
+        self._petdex_pets = []
+        self._petdex_shown = []
+        # petdex 的后台结果走**自己的**队列。
+        # 不能蹭 `_tray_actions` —— 那个是字符串命令通道，`_drain_tray`
+        # 会把不认识的东西**静默丢掉**（踩过：界面永远停在"正在拉清单…"）。
+        self._petdex_results: list = []
         self._chat_win = None
         self._sess_win = None
         self._preview_win = None
@@ -744,6 +756,10 @@ class PetApp:
         row += 1
         tk.Button(win, text=t("动画映射（什么情况播什么）…"),
                   command=self._open_mapping_window).grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
+        row += 1
+        tk.Button(win, text=t("宠物库（从 petdex 找一只来养）…"),
+                  command=self._open_petdex).grid(
             row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 6))
         row += 1
 
@@ -1024,6 +1040,285 @@ class PetApp:
         except Exception as exc:                         # noqa: BLE001
             log_error(f"生成皮肤缩略图失败：{skin_id}", exc)
             return None
+
+    def _open_petdex(self) -> None:
+        """宠物库：从 petdex 搜、下载、装成皮肤。
+
+        **我们不打包任何 petdex 宠物** —— 它不暴露单只的许可，而它接受的
+        五种许可里有三种和 MIT 冲突。所以这里只做客户端：用户自己选、
+        自己下到本地，界面给出宠物页链接让他自己确认许可。
+        """
+        tk = self.tk
+        if getattr(self, "_petdex_win", None) is not None:
+            try:
+                self._petdex_win.deiconify()
+                self._petdex_win.lift()
+                return
+            except Exception:                            # noqa: BLE001
+                self._petdex_win = None
+
+        win = tk.Toplevel(self.root)
+        self._petdex_win = win
+        win.title(t("宠物库（petdex）"))
+        win.geometry("560x520")
+        win.attributes("-topmost", True)
+
+        tk.Label(win, text=t("从 petdex 找一只来养"), font=("Microsoft YaHei UI", 11, "bold")
+                 ).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(win, text=t("下载到本地皮肤目录。许可请点「在浏览器打开」自己确认 —— "
+                            "我们不打包、不镜像任何宠物。"),
+                 fg="#777", wraplength=520, justify="left").pack(anchor="w", padx=14)
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", padx=14, pady=(8, 4))
+        v_q = tk.StringVar()
+        ent = tk.Entry(bar, textvariable=v_q, width=22)
+        ent.pack(side="left")
+        # Tk 的 OptionMenu 做不到"显示 A、值是 B"，所以**值就是 label**，
+        # 筛选时反查回 key。
+        #
+        # （第一版定义了 KIND_LABELS 却把 key 传了进去 —— 下拉框显示的是
+        # `all` 而不是「全部」。定义了没用上，测试还全绿：它断言的是
+        # "列表填了没有"，不是"下拉框显示了什么"。看图才发现。）
+        KIND_LABELS = [("all", t("全部")), ("character", t("角色")),
+                       ("creature", t("生物")), ("object", t("物件"))]
+        VER_LABELS = [("all", t("全部")), ("2", t("v2 有视线")), ("1", t("v1"))]
+        KIND_BY_LABEL = {lbl: k for k, lbl in KIND_LABELS}
+        VER_BY_LABEL = {lbl: k for k, lbl in VER_LABELS}
+
+        v_kind = tk.StringVar(value=KIND_LABELS[0][1])
+        v_ver = tk.StringVar(value=VER_LABELS[0][1])
+
+        # command 必须在**构造时**给 —— OptionMenu 没有可配置的 -command，
+        # 事后 `om.configure(command=...)` 会抛 `unknown option "-command"`，
+        # 而且是在 Tk 回调里抛，界面上看着就是"下拉框没反应"。
+        def refilter(*_a):
+            self._petdex_filter(v_q, v_kind, v_ver, lst, info,
+                                KIND_BY_LABEL, VER_BY_LABEL)
+
+        om1 = tk.OptionMenu(bar, v_kind, *[lbl for _, lbl in KIND_LABELS],
+                            command=refilter)
+        om1.configure(width=6)
+        om1.pack(side="left", padx=4)
+        om2 = tk.OptionMenu(bar, v_ver, *[lbl for _, lbl in VER_LABELS],
+                            command=refilter)
+        om2.configure(width=9)
+        om2.pack(side="left")
+        tk.Button(bar, text=t("刷新清单"),
+                  command=lambda: self._petdex_load(win, v_q, v_kind, v_ver, lst, info)
+                  ).pack(side="left", padx=6)
+
+        mid = tk.Frame(win)
+        mid.pack(fill="both", expand=True, padx=14, pady=4)
+        sb = tk.Scrollbar(mid, orient="vertical")
+        lst = tk.Listbox(mid, yscrollcommand=sb.set, activestyle="dotbox",
+                         font=("Consolas", 9))
+        sb.configure(command=lst.yview)
+        sb.pack(side="right", fill="y")
+        lst.pack(side="left", fill="both", expand=True)
+
+        info = tk.Label(win, text=t("还没拉清单。点「刷新清单」开始（一次几 MB）。"),
+                        fg="#666", anchor="w", justify="left", wraplength=520)
+        info.pack(fill="x", padx=14)
+
+        detail = tk.Label(win, text="", fg="#444", anchor="w", justify="left",
+                          wraplength=520)
+        detail.pack(fill="x", padx=14, pady=(4, 0))
+
+        # 选中就更新详情
+        def on_pick(_e=None):
+            p = self._petdex_pick(lst)
+            if not p:
+                return
+            already = ("petdex-" + str(p.get("slug"))) in pet_petdex.installed(skins_dir())
+            detail.configure(
+                text=f"{p.get('displayName')}  ·  {p.get('kind')}  ·  "
+                     f"v{p.get('spriteVersionNumber') or 1}"
+                     + (t("  ·  已装") if already else "")
+                     + "\n" + str(p.get("description") or "")[:200]
+                     + "\n" + t("作者：") + str(p.get("submittedBy") or t("未知"))
+                     + "\n" + pet_petdex.page_url(p.get("slug")))
+
+        lst.bind("<<ListboxSelect>>", on_pick)
+        self._petdex_on_pick = on_pick          # 筛选完也要叫一次（见 _petdex_filter）
+
+        btns = tk.Frame(win)
+        btns.pack(fill="x", padx=14, pady=(4, 12))
+
+        def do_install():
+            p = self._petdex_pick(lst)
+            if not p:
+                info.configure(text=t("先选一只"), fg="#B93B37")
+                return
+            info.configure(text=t("正在下载 ") + str(p.get("displayName")) + "…", fg="#666")
+            win.update_idletasks()
+            self._petdex_install_async(p, win, info, detail, lst)
+
+        tk.Button(btns, text=t("装这只"), command=do_install).pack(side="left")
+        tk.Button(btns, text=t("在浏览器打开"),
+                  command=lambda: self._petdex_open_page(lst)).pack(side="left", padx=6)
+        tk.Button(btns, text=t("看已装的…"),
+                  command=self._open_petdex_installed).pack(side="left")
+        tk.Button(btns, text=t("关闭"), width=8, command=lambda: (
+            win.destroy(), setattr(self, "_petdex_win", None))).pack(side="right")
+
+        # 打开就拉一次 —— 用户点进来就是想看东西
+        self._petdex_load(win, v_q, v_kind, v_ver, lst, info)
+        v_q.trace_add("write", lambda *a: self._petdex_filter(
+            v_q, v_kind, v_ver, lst, info))
+
+    # -- petdex 的辅助 ------------------------------------------------------
+    def _petdex_load(self, win, v_q, v_kind, v_ver, lst, info) -> None:
+        """后台拉清单，回来再填列表。"""
+        info.configure(text=t("正在拉清单…"), fg="#666")
+        win.update_idletasks()
+
+        def work():
+            try:
+                pets = pet_petdex.fetch_manifest()
+                self._petdex_results.append(("petdex-manifest", pets, None))
+            except Exception as exc:                     # noqa: BLE001
+                self._petdex_results.append(("petdex-manifest", None, str(exc)))
+
+        threading.Thread(target=work, name="dsh-pet-petdex", daemon=True).start()
+
+        def check():
+            for i, item in enumerate(list(self._petdex_results)):
+                if isinstance(item, tuple) and item and item[0] == "petdex-manifest":
+                    self._petdex_results.pop(i)
+                    _tag, pets, err = item
+                    if pets is None:
+                        info.configure(text=t("拉清单失败：") + str(err), fg="#B93B37")
+                        return
+                    self._petdex_pets = pets
+                    self._petdex_filter(v_q, v_kind, v_ver, lst, info)
+                    return
+            try:
+                if win.winfo_exists():
+                    win.after(200, check)
+            except Exception:                            # noqa: BLE001
+                pass
+
+        win.after(200, check)
+
+    def _petdex_filter(self, v_q, v_kind, v_ver, lst, info,
+                       kind_by_label=None, ver_by_label=None) -> None:
+        """按当前条件重填列表。**纯函数筛，这里只管显示。**
+
+        下拉框的值是**显示用的 label**，这里反查回 key。
+        """
+        pets = getattr(self, "_petdex_pets", None) or []
+        if not pets:
+            return
+        kind = (kind_by_label or {}).get(v_kind.get(), "all")
+        ver = (ver_by_label or {}).get(v_ver.get(), "all")
+        got = pet_petdex.search(
+            pets, v_q.get(),
+            kind="" if kind == "all" else kind,
+            version=0 if ver == "all" else int(ver))
+        LIMIT = 300
+        lst.delete(0, "end")
+        for p in got[:LIMIT]:
+            v = p.get("spriteVersionNumber") or 1
+            name = str(p.get("displayName") or p.get("slug"))[:26]
+            lst.insert("end", f"{name:<28} {str(p.get('kind')):<10} v{v}")
+        self._petdex_shown = got[:LIMIT]
+        more = t("（只显示前 300 只，再搜细一点）") if len(got) > LIMIT else ""
+        info.configure(text=t("共 ") + f"{len(got)} " + t("只 ") + more, fg="#666")
+        # 筛完自动选第一条并刷新详情 —— `selection_set` 是程序化选中，
+        # **不会**触发 `<<ListboxSelect>>`，得手动叫一次。
+        if got:
+            lst.selection_clear(0, "end")
+            lst.selection_set(0)
+            on_pick = getattr(self, "_petdex_on_pick", None)
+            if on_pick:
+                on_pick()
+
+    def _petdex_pick(self, lst):
+        sel = lst.curselection()
+        if not sel:
+            return None
+        shown = getattr(self, "_petdex_shown", None) or []
+        i = sel[0]
+        return shown[i] if 0 <= i < len(shown) else None
+
+    def _petdex_open_page(self, lst) -> None:
+        p = self._petdex_pick(lst)
+        if not p:
+            return
+        url = pet_petdex.page_url(p.get("slug"))
+        try:
+            webbrowser.open(url)
+        except Exception as exc:                         # noqa: BLE001
+            log_error(f"打不开浏览器：{url}", exc)
+
+    def _petdex_install_async(self, pet, win, info, detail, lst) -> None:
+        """下载在后台，进度用轮询贴回界面。
+
+        走 `_tray_actions` 那个现成队列 —— 托盘和热键也用它，主线程消费。
+        """
+        def work():
+            res = pet_petdex.install(pet, skins_dir())
+            self._petdex_results.append(("petdex-done", res, None))
+
+        threading.Thread(target=work, name="dsh-pet-petdex-dl", daemon=True).start()
+
+        def check():
+            for i, item in enumerate(list(self._petdex_results)):
+                if isinstance(item, tuple) and item and item[0] == "petdex-done":
+                    self._petdex_results.pop(i)
+                    res = item[1]
+                    if res.get("ok"):
+                        info.configure(
+                            text=t("装好了：") + str(res.get("display"))
+                                 + t("　去「皮肤」里选它（设置窗口）"), fg="#2E9E63")
+                        self._rebuild_menus()
+                    else:
+                        info.configure(text=t("装失败：") + str(res.get("error")),
+                                       fg="#B93B37")
+                    return
+            try:
+                if win.winfo_exists():
+                    win.after(200, check)
+            except Exception:                            # noqa: BLE001
+                pass
+
+        win.after(200, check)
+
+    def _open_petdex_installed(self) -> None:
+        """列出装过的 petdex 宠物，可以删。"""
+        tk = self.tk
+        got = pet_petdex.installed(skins_dir())
+        win = tk.Toplevel(self.root)
+        win.title(t("装过的宠物"))
+        win.attributes("-topmost", True)
+        tk.Label(win, text=t("从 petdex 装的") + f"（{len(got)}）",
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 4))
+        if not got:
+            tk.Label(win, text=t("还没装过。"), fg="#777").pack(anchor="w", padx=14)
+        else:
+            lb = tk.Listbox(win, width=42, height=min(12, len(got)), font=("Consolas", 9))
+            lb.pack(padx=14, fill="both", expand=True)
+            for s in got:
+                lb.insert("end", s)
+            st = tk.Label(win, text="", fg="#666")
+            st.pack(anchor="w", padx=14)
+
+            def rm():
+                sel = lb.curselection()
+                if not sel:
+                    return
+                sid = got[sel[0]]
+                if pet_petdex.uninstall(sid, skins_dir()):
+                    lb.delete(sel[0])
+                    st.configure(text=t("删了 ") + sid, fg="#2E9E63")
+                    self._rebuild_menus()
+                else:
+                    st.configure(text=t("删不掉"), fg="#B93B37")
+
+            tk.Button(win, text=t("删掉选中的"), command=rm).pack(pady=4)
+        tk.Button(win, text=t("关闭"), width=8,
+                  command=win.destroy).pack(pady=(0, 12))
 
     def _open_mapping_window(self) -> None:
         """「什么情况播什么」的编辑界面。
@@ -1758,6 +2053,12 @@ class PetApp:
             return "angry"
         if now < self.petted_until:
             return "heart"
+        # 喂食中 —— 原来借的是「被戳」动画，看不出她在吃
+        if now < self.munch_until:
+            return "munch"
+        # 刚被滚轮拉扯 —— 原来缩放是**零反馈**的
+        if now < self.stretch_until:
+            return "stretch"
         if self.hover_since and now - self.hover_since > HOVER_DELAY:
             return "question"
         if self.snap.state == "sleeping":
@@ -1798,8 +2099,15 @@ class PetApp:
         self.hover_since = 0.0
 
     def _on_wheel(self, e):
-        """滚轮缩放。Windows 上 delta 是 120 的整数倍。"""
+        """滚轮缩放。Windows 上 delta 是 120 的整数倍。
+
+        **拉得动才给反应** —— 已经到最大/最小的时候再滚，她不该有反应，
+        不然会变成"滚一下抖一下"。
+        """
+        before = self.scale
         self._apply_scale(self.scale + (0.1 if e.delta > 0 else -0.1))
+        if abs(self.scale - before) > 0.005:
+            self.stretch_until = time.time() + STRETCH_S
 
     def _on_double(self, _e):
         """双击打开设置。标记 _moved 免得 release 又当成一次「摸」。"""
@@ -1910,6 +2218,16 @@ class PetApp:
                 self._open_session_actions()
                 return
             now = time.time()
+            # 睡着被戳 = 惊醒，不是"摸一下"。
+            # 原来和醒着被戳走的是同一条路（同一套动画、同一句话），
+            # 完全看不出区别 —— 而"睡着被弄醒"是另一件事。
+            if self.snap.state in ("sleeping", "dozing") and self.companion is not None:
+                self.poke_until = now + POKE_STARTLE_S
+                self.stretch_until = 0.0
+                self.companion.touch("poke")
+                self.companion.say(say_line("STARTLE_LINES"), 2.8)
+                self._toggle_detail()
+                return
             # 单击 = 戳一下：播一次反应动画（皮肤没提供就只切详情卡）
             durs = self.reaction_durs.get("poke") or []
             if durs:
@@ -2203,6 +2521,9 @@ class PetApp:
         durs = self.reaction_durs.get("poke") or []
         if durs:
             self.poke_until = time.time() + sum(durs) / 1000.0
+        # 吃东西的碎屑。原来喂食只是"播一次被戳动画 + 一句话"，
+        # 三秒之后什么都看不出来她刚吃过。
+        self.munch_until = time.time() + MUNCH_S
         self.companion.touch("feed")
         self.companion.save()
         self._play_sound("feed")

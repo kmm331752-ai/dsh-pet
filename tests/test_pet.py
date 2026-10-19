@@ -35,6 +35,7 @@ import pet_food as FD  # noqa: E402
 import pet_i18n as I  # noqa: E402
 import pet_mapping as MP  # noqa: E402
 import pet_music as MU  # noqa: E402
+import pet_petdex as PX  # noqa: E402
 import pet_platform as PF  # noqa: E402
 import pet_render as PR  # noqa: E402
 import pet_skin_install as SI  # noqa: E402
@@ -2384,6 +2385,171 @@ class TestOpenPetsPackage(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.DIR, "pet.json")))
         self.assertTrue(any(os.path.exists(os.path.join(self.DIR, n))
                             for n in ("spritesheet.webp", "spritesheet.png")))
+
+
+class TestPetdex(unittest.TestCase):
+    """petdex 客户端 —— 纯函数部分。
+
+    **为什么不打包 petdex 的宠物**：它不暴露单只的许可（`/api/manifest`
+    没有这个字段、`/api/pets/<slug>` 要鉴权、下载下来的 pet.json 只有
+    4 个必填字段），而它接受的五种许可里有三种和 MIT 冲突
+    （`cc-by-sa` 病毒式、`cc-by-nc` 禁商用、`all-rights-reserved` 没授权）。
+    所以这里只做客户端：用户自己选、自己下。
+    """
+
+    PETS = [
+        {"slug": "alpha", "displayName": "Alpha", "kind": "character",
+         "submittedBy": "someone", "spriteVersionNumber": 2},
+        {"slug": "beta", "displayName": "Beta Cat", "kind": "creature",
+         "submittedBy": "other", "spriteVersionNumber": 1},
+        {"slug": "gamma", "displayName": "Gamma", "kind": "object"},
+    ]
+
+    def test_search_by_text(self):
+        got = PX.search(self.PETS, "alpha")
+        self.assertEqual([p["slug"] for p in got], ["alpha"])
+        # 名字、作者也要能搜到
+        self.assertEqual([p["slug"] for p in PX.search(self.PETS, "cat")], ["beta"])
+        self.assertEqual([p["slug"] for p in PX.search(self.PETS, "other")], ["beta"])
+
+    def test_search_by_kind(self):
+        got = PX.search(self.PETS, kind="creature")
+        self.assertEqual([p["slug"] for p in got], ["beta"])
+
+    def test_search_by_version(self):
+        """v2 才有视线格子 —— 按版本筛是有实际意义的。"""
+        got = PX.search(self.PETS, version=2)
+        self.assertEqual([p["slug"] for p in got], ["alpha"])
+        # 没写版本的当 v1
+        self.assertEqual([p["slug"] for p in PX.search(self.PETS, version=1)],
+                         ["beta", "gamma"])
+
+    def test_search_combines_filters(self):
+        self.assertEqual(PX.search(self.PETS, "a", kind="character", version=2),
+                         [self.PETS[0]])
+        self.assertEqual(PX.search(self.PETS, "alpha", kind="creature"), [])
+
+    def test_search_empty_query_returns_everything(self):
+        self.assertEqual(len(PX.search(self.PETS, "")), 3)
+        self.assertEqual(len(PX.search(self.PETS, "   ")), 3)
+
+    def test_search_ignores_junk_entries(self):
+        got = PX.search([None, "x", 42, self.PETS[0]], "")
+        self.assertEqual([p["slug"] for p in got], ["alpha"])
+
+    def test_page_url(self):
+        self.assertEqual(PX.page_url("my-pet"), "https://petdex.dev/pets/my-pet")
+        # 要转义 —— slug 进 URL
+        self.assertIn("%20", PX.page_url("a b"))
+
+    def test_install_rejects_bad_slug(self):
+        """slug 会变成目录名，路径穿越必须挡住。
+
+        这是**用户输入之外唯一一个进路径的字符串**（来自网络），
+        判一下成本为零。
+        """
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        for bad in ("", "   ", "../evil", "a/b", "a\\b", None):
+            with self.subTest(slug=repr(bad)):
+                res = PX.install({"slug": bad}, tmp)
+                self.assertFalse(res["ok"])
+        self.assertEqual(os.listdir(tmp), [], "不该留下任何目录")
+
+    def test_install_rejects_pet_without_image(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        res = PX.install({"slug": "nopic", "displayName": "No Pic"}, tmp)
+        self.assertFalse(res["ok"])
+        self.assertEqual(os.listdir(tmp), [], "失败的安装不该留半截目录")
+
+    def test_validate_rejects_wrong_size(self):
+        import tempfile
+        from PIL import Image
+        tmp = tempfile.mkdtemp()
+        for name, size in (("小图", (400, 400)),
+                           ("宽不对", (1000, 1872)),
+                           ("高不是倍数", (1536, 1872 + 100))):
+            with self.subTest(case=name):
+                d = os.path.join(tmp, name)
+                os.makedirs(d, exist_ok=True)
+                Image.new("RGBA", size).save(os.path.join(d, "spritesheet.webp"))
+                ok, why = PX.validate_pet_dir(d)
+                self.assertFalse(ok, f"{name} 该被拒，实际过了")
+
+    def test_validate_accepts_the_contract_sizes(self):
+        import tempfile
+        from PIL import Image
+        tmp = tempfile.mkdtemp()
+        for rows, name in ((9, "v1"), (11, "v2")):
+            with self.subTest(version=name):
+                d = os.path.join(tmp, name)
+                os.makedirs(d, exist_ok=True)
+                Image.new("RGBA", (1536, rows * 208)).save(
+                    os.path.join(d, "spritesheet.webp"))
+                ok, why = PX.validate_pet_dir(d)
+                self.assertTrue(ok, why)
+
+    def test_validate_rejects_svg(self):
+        """本项目只认位图图集。"""
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        with open(os.path.join(tmp, "spritesheet.svg"), "w") as fh:
+            fh.write("<svg/>")
+        ok, why = PX.validate_pet_dir(tmp)
+        self.assertFalse(ok)
+        self.assertIn("SVG", why)
+
+    def test_installed_and_uninstall(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        for n in ("petdex-a", "petdex-b", "别人手放的皮肤"):
+            os.makedirs(os.path.join(tmp, n), exist_ok=True)
+        self.assertEqual(PX.installed(tmp), ["petdex-a", "petdex-b"])
+
+        self.assertTrue(PX.uninstall("petdex-a", tmp))
+        self.assertFalse(os.path.exists(os.path.join(tmp, "petdex-a")))
+        self.assertEqual(PX.installed(tmp), ["petdex-b"])
+
+    def test_uninstall_refuses_foreign_skins(self):
+        """**只认 `petdex-` 前缀** —— 传错名字不能删掉别人的皮肤。"""
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        mine = os.path.join(tmp, "我自己的皮肤")
+        os.makedirs(mine, exist_ok=True)
+        self.assertFalse(PX.uninstall("我自己的皮肤", tmp))
+        self.assertFalse(PX.uninstall("../我自己的皮肤", tmp))
+        self.assertTrue(os.path.isdir(mine), "别人的皮肤被删了")
+
+    def test_uninstall_unknown_is_false_not_a_crash(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.assertFalse(PX.uninstall("petdex-不存在", tmp))
+        self.assertFalse(PX.uninstall("petdex-x", os.path.join(tmp, "没这个目录")))
+
+
+class TestPetdexLive(unittest.TestCase):
+    """要联网的那部分。**没网就 skip，不是失败** —— CI runner 可能没外网。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pets = None
+        try:
+            cls.pets = PX.fetch_manifest()
+        except Exception as exc:                         # noqa: BLE001
+            raise unittest.SkipTest(f"拉不到 petdex 清单：{exc}")
+
+    def test_manifest_shape(self):
+        self.assertGreater(len(self.pets), 100)
+        for p in self.pets[:20]:
+            self.assertIn("slug", p)
+            self.assertIn("spritesheetUrl", p)
+
+    def test_search_on_real_data(self):
+        got = PX.search(self.pets, version=2)
+        self.assertTrue(got, "一只 v2 都没有？")
+        for p in got[:10]:
+            self.assertEqual(p.get("spriteVersionNumber"), 2)
 
 
 class TestConfig(unittest.TestCase):

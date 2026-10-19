@@ -38,6 +38,8 @@ import pet_music as MU  # noqa: E402
 import pet_activity as AC  # noqa: E402
 import pet_i18n as I  # noqa: E402
 import pet_sources as S  # noqa: E402
+import pet_food  # noqa: E402
+from pet_render import overlay_for  # noqa: E402
 
 TK_OK = True
 try:
@@ -1484,6 +1486,98 @@ class TestMappingWindow(E2EBase):
 
         walk(win)
         self.assertTrue(any("忽略" in x for x in texts), f"界面没提示：{texts[-6:]}")
+
+
+class TestNewInteractions(E2EBase):
+    """补上的三个"完全没有反馈"的情况。
+
+    | 情况 | 原来 |
+    |---|---|
+    | 滚轮缩放 | `_apply_scale` 直接改大小，**零反馈** |
+    | 睡着时被戳 | 和醒着被戳走同一条路（同动画同台词） |
+    | 喂食 | 借的是「被戳」动画，看不出在吃 |
+    """
+
+    def _app(self):
+        app = self.make_app(force_state=None, no_companion=False, skin="openpets")
+        return app
+
+    def _wheel(self, app, delta=120):
+        app._on_wheel(type("E", (), {"delta": delta})())
+
+    def test_wheel_stretch_reaches_the_screen(self):
+        """滚轮缩放要有拉扯装饰 —— 断言像素。"""
+        app = self._app()
+        before = self.capture(app, poll=False)
+        self._wheel(app)
+        after = self.capture(app, poll=False)
+        self.assertIsNotNone(self.diff_box(before, after),
+                             "滚轮之后画面没变")
+        self.assertEqual(app._overlay_kind(time.time()), "stretch")
+
+    def test_wheel_at_the_limit_gives_no_reaction(self):
+        """已经到最大了再滚，她不该有反应。
+
+        不然会变成"滚一下抖一下" —— 用户滚到底是常见动作。
+        """
+        app = self._app()
+        app._apply_scale(P.SCALE_MAX)
+        app.stretch_until = 0.0
+        self._wheel(app)
+        self.assertNotEqual(app._overlay_kind(time.time()), "stretch",
+                            "到顶了还在抖")
+
+    def test_feeding_shows_crumbs(self):
+        """喂食要有"在吃"的装饰，不是借「被戳」那套。"""
+        app = self._app()
+        app._do_feed(pet_food.FOOD_IDS[0])
+        self.assertEqual(app._overlay_kind(time.time()), "munch")
+        canvas = self.capture(app, poll=False)
+        self.assertIsNotNone(canvas)
+
+    def test_waking_up_is_different_from_being_petted(self):
+        """睡着被戳 = 惊醒，和醒着被戳**不是一回事**。
+
+        原来两条走同一条路（同一套动画、同一句话），完全看不出区别。
+        """
+        app = self._app()
+        app.snap.state = "sleeping"
+        app._moved = False
+        app._drag = (0, 0, 0, 0)
+        app._on_release(type("E", (), {"y": 10, "x": 10, "x_root": 0, "y_root": 0})())
+        self.assertIn(app.companion.bubble, S.STARTLE_LINES,
+                      f"说的不是惊醒的话：{app.companion.bubble!r}")
+
+    def test_awake_poke_still_uses_the_normal_lines(self):
+        """醒着被戳不能变成惊醒的话。"""
+        app = self._app()
+        app.snap.state = "idle"
+        app._moved = False
+        app._drag = (0, 0, 0, 0)
+        # 随机性：多戳几次，一次都不该是惊醒的话
+        for _ in range(12):
+            app.pet_streak = 0
+            app.annoyed_until = 0.0
+            app.companion.bubble = ""
+            app._moved = False
+            app._drag = (0, 0, 0, 0)
+            app._on_release(type("E", (), {"y": 10, "x": 10,
+                                           "x_root": 0, "y_root": 0})())
+            self.assertNotIn(app.companion.bubble, S.STARTLE_LINES,
+                             "醒着被戳说了惊醒的话")
+
+    def test_all_three_overlays_render(self):
+        """三个新装饰都要画得出来（相位 0 最容易崩 —— `stretch` 就崩过）。"""
+        for kind in ("stretch", "exclaim", "munch"):
+            for ph in (0.0, 0.25, 0.5, 0.75, 1.0):
+                with self.subTest(kind=kind, phase=ph):
+                    im = overlay_for(kind, ph)
+                    self.assertIsNotNone(im)
+
+    def test_stretch_has_content_at_phase_zero(self):
+        """相位 0 曾经抛 `ValueError: y1 must be >= y0` —— 弧的包围盒写反了。"""
+        im = overlay_for("stretch", 0.0)
+        self.assertIsNotNone(im.getbbox(), "相位 0 什么都没画")
 
 
 if __name__ == "__main__":

@@ -201,6 +201,62 @@ def _overlay_layer(kind: str, phase: float) -> Image.Image:
             d.line([nx + r, ny - r * 2.3, nx + r * 2.3, ny - r * 1.6],
                    fill=col, width=max(2, int(2.2 * s)))
 
+    elif kind == "stretch":
+        # 被滚轮拉扯：上下两道弧 + 两侧往外拉的小线段。
+        # 相位驱动弧的弯曲程度，看起来像被拽了一下。
+        k = math.sin(phase * math.pi)          # 0 -> 1 -> 0
+        col = (170, 210, 220, int(150 + 80 * k))
+        wdt = max(2, int(2.6 * s))
+        span = W * (0.26 + 0.05 * k)
+        # 弧的包围盒**先算中心再算半高** —— 直接写 y0/y1 会在某个相位把
+        # 上边写到下边下面去（`ValueError: y1 must be >= y0`，相位 0 就崩）。
+        bow = 8 * k                            # 弯曲量
+        for cy_frac, start, end in ((0.03, 200, 340), (0.95, 20, 160)):
+            cy_arc = top_y + H * cy_frac
+            hh = max(6.0, 10.0 + bow)          # 半高，永远为正
+            d.arc([cx - span, cy_arc - hh, cx + span, cy_arc + hh],
+                  start=start, end=end, fill=col, width=wdt)
+        # 两侧往外拉
+        for side in (-1, 1):
+            x0 = cx + side * (span + 6 * s)
+            x1 = x0 + side * (10 + 12 * k) * s
+            y0 = top_y + H * 0.48
+            d.line([x0, y0, x1, y0], fill=col, width=wdt)
+            d.line([x1, y0, x1 - side * 5 * s, y0 - 5 * s], fill=col, width=wdt)
+            d.line([x1, y0, x1 - side * 5 * s, y0 + 5 * s], fill=col, width=wdt)
+
+    elif kind == "exclaim":
+        # 惊醒：一个大感叹号，弹一下再淡出。
+        # 用亮黄 —— 这个该是最醒目的一种，别的装饰都是柔和色。
+        t = min(1.0, phase * 1.6)
+        pop = 1.0 + 0.35 * math.sin(min(1.0, t * 3) * math.pi)
+        alpha = int(245 * (1.0 - max(0.0, (t - 0.55)) / 0.45))
+        if alpha > 15:
+            ex = cx + W * 0.20
+            ey = top_y + H * 0.16 - 6 * s
+            col = (255, 216, 92, alpha)
+            bw = 7 * s * pop
+            bh = 22 * s * pop
+            d.rounded_rectangle([ex - bw / 2, ey - bh, ex + bw / 2, ey - bh * 0.32],
+                                radius=bw / 2, fill=col)
+            r = bw * 0.56
+            d.ellipse([ex - r, ey - r * 0.4, ex + r, ey + r * 1.6], fill=col)
+
+    elif kind == "munch":
+        # 吃东西：嘴边几粒碎屑往下掉，循环。
+        # 暖棕 —— 食物的颜色。和 music 的橙粉分开（那个更亮更粉）。
+        for i in range(3):
+            t = (phase * 2.2 + i * 0.34) % 1.0
+            mx = cx + W * (0.10 + 0.05 * i) * (1 if i % 2 else -1)
+            my = top_y + H * 0.52 + t * H * 0.20
+            alpha = int(225 * (1.0 - t * 0.85))
+            if alpha <= 20:
+                continue
+            r = (4.2 - i * 0.5) * s
+            col = ((214, 160, 104, alpha) if i % 2 == 0
+                   else (240, 200, 150, alpha))
+            d.ellipse([mx - r, my - r, mx + r, my + r], fill=col)
+
     return layer
 
 

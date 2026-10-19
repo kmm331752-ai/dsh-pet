@@ -97,6 +97,87 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
+    "！！":
+        "!!",
+    "吓我一跳":
+        "You startled me",
+    "谁呀…":
+        "Who's there…",
+    "干嘛呀，人家在睡":
+        "Hey, I was sleeping",
+
+    "  ·  已装":
+        "  ·  installed",
+
+    "宠物库（petdex）":
+        "Pet library (petdex)",
+    "从 petdex 找一只来养":
+        "Find a pet on petdex",
+    "下载到本地皮肤目录。许可请点「在浏览器打开」自己确认 —— 我们不打包、不镜像任何宠物。":
+        "Downloads into your local skins folder. Check the license yourself via “Open in browser” — we do not bundle or mirror any pet.",
+    "全部":
+        "All",
+    "角色":
+        "Character",
+    "生物":
+        "Creature",
+    "物件":
+        "Object",
+    "v2 有视线":
+        "v2 (with gaze)",
+    "v1":
+        "v1",
+    "刷新清单":
+        "Refresh list",
+    "装这只":
+        "Install this",
+    "在浏览器打开":
+        "Open in browser",
+    "看已装的…":
+        "Installed…",
+    "还没拉清单。点「刷新清单」开始（一次几 MB）。":
+        "No list yet. Click “Refresh list” (a few MB).",
+    "正在拉清单…":
+        "Fetching list…",
+    "拉清单失败：":
+        "Failed to fetch list: ",
+    "先选一只":
+        "Pick a pet first",
+    "正在下载 ":
+        "Downloading ",
+    "装好了：":
+        "Installed: ",
+    "　去「皮肤」里选它（设置窗口）":
+        "  — pick it under Skin in Settings",
+    "装失败：":
+        "Install failed: ",
+    "已装":
+        "installed",
+    "作者：":
+        "By: ",
+    "未知":
+        "unknown",
+    "共 ":
+        "Total ",
+    "只 ":
+        "pets ",
+    "（只显示前 300 只，再搜细一点）":
+        "(showing first 300 — narrow your search)",
+    "从 petdex 装的":
+        "Installed from petdex",
+    "还没装过。":
+        "Nothing installed yet.",
+    "删掉选中的":
+        "Delete selected",
+    "删了 ":
+        "Deleted ",
+    "删不掉":
+        "Could not delete",
+    "装过的宠物":
+        "Installed pets",
+    "宠物库（从 petdex 找一只来养）…":
+        "Pet library (petdex)…",
+
     "动画映射":
         "Animation mapping",
     "什么情况播什么":

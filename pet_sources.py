@@ -569,6 +569,12 @@ NIGHT_HOURS = (23, 7)            # [23:00, 07:00)
 HEALTH_ON = True
 # 同一个应用连续待多久算"待太久"（提醒起来动动）
 SAME_APP_LONG_S = 50 * 60
+# 滚轮拉扯的反应时长（短 —— 滚轮是连续动作，长了会糊成一片）
+STRETCH_S = 0.55
+# 吃东西的碎屑飘多久
+MUNCH_S = 2.6
+# 睡着被戳，播多久的"惊醒"反应
+POKE_STARTLE_S = 1.4
 # 鼠标停这么久就回中性姿势（契约里的 codexV2GazeIdleResetMs）
 GAZE_IDLE_RESET_S = 1.2
 HEALTH_EVERY = 50 * 60           # 连续活动多久提醒一次
@@ -1277,6 +1283,8 @@ PET_LINES = ["嘿嘿", "好舒服", "再摸摸", "最喜欢你了"]
 ANNOY_LINES = ["别摸了…", "够了够了", "手拿开", "烦不烦"]
 DIZZY_LINES = ["晕…", "别甩了！", "天旋地转", "放我下来"]
 GRAB_LINES = ["喂！", "放开我", "干嘛呀", "别拎着我"]
+# 睡着被戳 —— 和"被摸"分开：这是被弄醒，语气不一样
+STARTLE_LINES = ["！！", "吓我一跳", "谁呀…", "唔…醒了醒了", "干嘛呀，人家在睡"]
 HUNGRY_LINES = ["有点饿了…", "想吃东西", "喂我一口嘛"]
 LONELY_LINES = ["好久没理我了", "在忙吗", "唉…"]
 MORNING_LINES = ["早啊", "今天也加油", "睡醒啦"]
@@ -1305,7 +1313,8 @@ WATER_LINES = ["喝口水吧", "该补水了", "杯子空了吧"]
 _LINE_DEFAULTS = {
     "WAKE_LINES": WAKE_LINES, "SLEEP_LINES": SLEEP_LINES, "YAWN_LINES": YAWN_LINES,
     "ROAM_LINES": ROAM_LINES, "PET_LINES": PET_LINES,
-    "ANNOY_LINES": ANNOY_LINES, "DIZZY_LINES": DIZZY_LINES, "GRAB_LINES": GRAB_LINES,
+    "ANNOY_LINES": ANNOY_LINES, "DIZZY_LINES": DIZZY_LINES,
+    "STARTLE_LINES": STARTLE_LINES, "GRAB_LINES": GRAB_LINES,
     "HUNGRY_LINES": HUNGRY_LINES, "LONELY_LINES": LONELY_LINES,
     "MORNING_LINES": MORNING_LINES, "NIGHT_LINES": NIGHT_LINES,
     "EDGE_LINES": EDGE_LINES, "POMO_DONE_LINES": POMO_DONE_LINES,
