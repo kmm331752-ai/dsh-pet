@@ -2591,21 +2591,29 @@ class TestSoakVerdict(unittest.TestCase):
             "tools", "soak.py")
         with open(path, encoding="utf-8") as fh:
             src = fh.read()
-        # 只取 verdict 函数体 —— 不执行模块级的副作用
-        start = src.index("def verdict(")
-        end = src.index("def main()")
+        # 取 `FakeIdle` + `verdict` 两段 —— **不执行模块级的副作用**
+        # （那会建临时目录、patch `pet_base.data_dir`）。
+        #
+        # `FakeIdle` 也要带上：`verdict` 里"不满一个作息周期就不判卡死"
+        # 用的是 `FakeIdle.CYCLE`。只带 `verdict` 的话是 NameError
+        # （第一版就是这样，12 条全挂）。
+        a = src.index("class FakeIdle:")
+        b = src.index("class FakeActivity:")
+        c = src.index("def verdict(")
+        d = src.index("def main()")
         ns = {}
-        exec(compile(src[start:end], "soak-verdict", "exec"), ns)  # noqa: S102
+        exec(compile(src[a:b] + src[c:d], "soak-verdict", "exec"), ns)  # noqa: S102
         cls.verdict = staticmethod(ns["verdict"])
+        cls.FakeIdle = ns["FakeIdle"]
 
     def test_flat_run_passes(self):
         """什么都不涨 —— 该过。"""
-        bad, _warn = self.verdict(self._rows())
+        bad, _warn = self.verdict(self._rows(), covered_s=99999)
         self.assertEqual(bad, [], f"平稳的跑法被误报了：{bad}")
 
     def test_short_run_does_not_judge(self):
         """样本太少就别下结论 —— 启动阶段涨是正常的。"""
-        bad, _warn = self.verdict(self._rows(n=3))
+        bad, _warn = self.verdict(self._rows(n=3), covered_s=99999)
         self.assertEqual(bad, [], "样本不够就报警了")
 
     def test_memory_leak_is_caught(self):
@@ -2613,7 +2621,7 @@ class TestSoakVerdict(unittest.TestCase):
         rows = self._rows(n=12)
         for i, r in enumerate(rows):                     # 每个样本 +10MB
             r["rss"] = 100.0 + i * 10
-        bad, _warn = self.verdict(rows)
+        bad, _warn = self.verdict(rows, covered_s=99999)
         self.assertTrue(any("内存" in b for b in bad), f"没抓到内存涨：{bad}")
 
     def test_small_memory_wobble_is_not_a_leak(self):
@@ -2621,21 +2629,21 @@ class TestSoakVerdict(unittest.TestCase):
         rows = self._rows(n=12)
         for i, r in enumerate(rows):
             r["rss"] = 100.0 + (i % 3) * 4             # 100~108 来回晃
-        bad, _warn = self.verdict(rows)
+        bad, _warn = self.verdict(rows, covered_s=99999)
         self.assertEqual(bad, [], f"小幅波动被当成泄漏：{bad}")
 
     def test_object_leak_is_caught(self):
         rows = self._rows(n=12)
         for i, r in enumerate(rows):
             r["objs"] = 30000 + i * 4000
-        bad, _warn = self.verdict(rows)
+        bad, _warn = self.verdict(rows, covered_s=99999)
         self.assertTrue(any("对象" in b for b in bad), f"没抓到对象涨：{bad}")
 
     def test_thread_leak_is_caught(self):
         rows = self._rows(n=12)
         for i, r in enumerate(rows):
             r["threads"] = 2 + i
-        bad, _warn = self.verdict(rows)
+        bad, _warn = self.verdict(rows, covered_s=99999)
         self.assertTrue(any("线程" in b for b in bad), f"没抓到线程涨：{bad}")
 
     def test_stuck_state_is_caught(self):
@@ -2643,13 +2651,14 @@ class TestSoakVerdict(unittest.TestCase):
 
         （真踩过：`wake()` 是一次性的，下一轮状态机又把她哄睡了。）
         """
-        bad, _warn = self.verdict(self._rows(n=12, states=["idle"]))
+        bad, _warn = self.verdict(self._rows(n=12, states=["idle"]), covered_s=99999)
         self.assertTrue(any("停在" in b for b in bad), f"没抓到卡死：{bad}")
         self.assertTrue(any("状态机没在动" in b for b in bad), str(bad))
 
     def test_a_few_states_is_enough_to_pass(self):
         """只要能换状态就行，不要求换很多。"""
-        bad, _warn = self.verdict(self._rows(n=12, states=["idle", "roaming", "gazing"]))
+        bad, _warn = self.verdict(self._rows(n=12, states=["idle", "roaming", "gazing"]),
+                              covered_s=99999)
         self.assertEqual(bad, [], f"三个状态还被判卡死：{bad}")
 
     def test_unbounded_growth_is_caught(self):
@@ -2659,7 +2668,7 @@ class TestSoakVerdict(unittest.TestCase):
                 rows = self._rows(n=12)
                 for i, r in enumerate(rows):
                     r[key] = i * 30                  # 涨 330，超过 200 的线
-                bad, _warn = self.verdict(rows)
+                bad, _warn = self.verdict(rows, covered_s=99999)
                 self.assertTrue(any(label in b for b in bad),
                                 f"没抓到 {label} 涨：{bad}")
 
@@ -2667,16 +2676,16 @@ class TestSoakVerdict(unittest.TestCase):
         rows = self._rows(n=12)
         for i, r in enumerate(rows):
             r["errlog"] = i * 2000
-        bad, _warn = self.verdict(rows)
+        bad, _warn = self.verdict(rows, covered_s=99999)
         self.assertTrue(any("错误日志" in b for b in bad), f"没抓到日志涨：{bad}")
 
     def test_warnings_are_reported_separately(self):
         """状态分布要报出来（给人看），但不算失败。"""
-        _bad, warn = self.verdict(self._rows())
+        _bad, warn = self.verdict(self._rows(), covered_s=99999)
         self.assertTrue(any("状态分布" in w for w in warn), str(warn))
 
     def test_empty_rows_do_not_crash(self):
-        bad, warn = self.verdict([])
+        bad, warn = self.verdict([], covered_s=99999)
         self.assertEqual(bad, [])
         self.assertEqual(warn, [])
 

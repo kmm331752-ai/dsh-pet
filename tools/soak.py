@@ -176,10 +176,14 @@ class FakeIdle:
     """
 
     CYCLE = 40 * 60
+    # 相位锚点。**不能用绝对时间戳取模** —— 那样每次跑的相位是随机的，
+    # 9 分钟的跑法可能整段落在"夜里"，于是她 95% 的时间在睡，
+    # 判定就误报"卡住了"。锚在开始时刻才能让同样的参数跑出一样的结果。
+    ANCHOR = 0.0
 
     @staticmethod
     def seconds(now: float) -> float:
-        t = now % FakeIdle.CYCLE
+        t = (now - FakeIdle.ANCHOR) % FakeIdle.CYCLE
         if t < 12 * 60:
             return 20.0                    # 醒着
         if t < 22 * 60:
@@ -267,7 +271,8 @@ def sample(app, fm, fa, now: float) -> dict:
     }
 
 
-def verdict(rows: list, warmup: int = 3, states: dict = None) -> tuple:
+def verdict(rows: list, warmup: int = 3, states: dict = None,
+            covered_s: float = 1e9) -> tuple:
     """判定。**判断，不是评分表** —— 每条对应一个具体的失败。
 
     前 `warmup` 个样本不算 —— 启动时缓存要预热，那一段涨是正常的。
@@ -301,13 +306,21 @@ def verdict(rows: list, warmup: int = 3, states: dict = None) -> tuple:
             states[r["state"]] = states.get(r["state"], 0) + 1
     total = sum(states.values()) or 1
     top, n = max(states.items(), key=lambda kv: kv[1])
-    if n / total > 0.92:
-        bad.append(f"她 {n / total * 100:.0f}% 的时间都停在 {top!r} —— 卡住了？")
-    # 陪伴模式该**换**状态。只有一个状态说明压根没进陪伴模式，
-    # 或者状态机死了 —— 两种都值得报。
-    if len(states) < 3:
-        bad.append(f"整场只出现了 {len(states)} 个状态（{sorted(states)}）—— "
-                   f"状态机没在动？")
+
+    # **不满一个作息周期就不判"卡死"。**
+    # 一个周期是 40 分钟；不到一个周期，你分不清"她卡住了"和"她正在睡"。
+    # CI 那个 9 分钟的跑法只查泄漏 —— 那是它的本职。
+    if covered_s < FakeIdle.CYCLE:
+        warn.append(f"只跑了 {covered_s / 60:.0f} 个模拟分钟（不足一个作息周期"
+                    f" {FakeIdle.CYCLE // 60} 分钟），不判断是否卡死")
+    else:
+        if n / total > 0.92:
+            bad.append(f"她 {n / total * 100:.0f}% 的时间都停在 {top!r} —— 卡住了？")
+        # 陪伴模式该**换**状态。只有一个状态说明压根没进陪伴模式，
+        # 或者状态机死了 —— 两种都值得报。
+        if len(states) < 3:
+            bad.append(f"整场只出现了 {len(states)} 个状态（{sorted(states)}）—— "
+                       f"状态机没在动？")
     warn.append(f"状态分布：{dict(sorted(states.items(), key=lambda kv: -kv[1]))}")
 
     # 无界增长
@@ -343,6 +356,7 @@ def main() -> int:
     # 会把 time 模块对象复制进每个命名空间（规则 6/7 踩过）。
     base = time.time()
     clock = [base]
+    FakeIdle.ANCHOR = base                            # 相位从 0 开始
 
     # **只换 `time()`，别的照旧。**
     # 第一版用一个只有 time() 的类把整个 `time` 模块替掉了 ——
@@ -411,7 +425,7 @@ def main() -> int:
                       f"{r['threads']:>5} {r['state']:>10}")
 
     wall = time.perf_counter() - t0
-    bad, warn = verdict(rows, states=state_counts)
+    bad, warn = verdict(rows, states=state_counts, covered_s=total_s)
 
     if not args.quiet:
         print()
