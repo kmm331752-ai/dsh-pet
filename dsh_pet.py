@@ -2767,6 +2767,9 @@ class PetApp:
                 self._feed_win.destroy()
             except Exception:                            # noqa: BLE001
                 pass
+        # 旧窗口的控件跟着一起死了 —— 清掉引用，别再往上画
+        self._feed_bar = None
+        self._feed_pct_label = None
         win = tk.Toplevel(self.root)
         self._feed_win = win
         win.title(t("喂她吃点什么"))
@@ -2779,11 +2782,12 @@ class PetApp:
         tk.Label(head, text=t("饱足"), anchor="w").pack(side="left")
         bar = tk.Canvas(head, width=150, height=12, highlightthickness=0, bg="#2A2E3A")
         bar.pack(side="left", padx=8)
-        pct = max(0.0, min(1.0, getattr(m, "satiety", 0.0)))
-        bar.create_rectangle(0, 0, int(150 * pct), 12,
-                             fill="#5BC98B" if pct < pet_food.FULL_AT else "#E8A33D",
-                             outline="")
-        tk.Label(head, text=f"{int(pct * 100)}%", anchor="w").pack(side="left")
+        # **存引用，喂完原地更新** —— 原来靠销毁重建来刷新，
+        # 结果窗口从桌宠旁边跳到屏幕左上角（不设 geometry，Tk 自己摆）。
+        self._feed_pct_label = tk.Label(head, text="", anchor="w")
+        self._feed_pct_label.pack(side="left")
+        self._feed_bar = bar
+        self._redraw_feed_bar()
 
         grid = tk.Frame(win)
         grid.pack(padx=12, pady=(6, 4))
@@ -2826,6 +2830,24 @@ class PetApp:
                   command=lambda: (win.destroy(),
                                    setattr(self, "_feed_win", None))).pack(pady=(0, 10))
 
+    def _redraw_feed_bar(self) -> None:
+        """原地重画饱足条。**不重建窗口** —— 重建会让它跳位置。"""
+        bar = getattr(self, "_feed_bar", None)
+        if bar is None:
+            return
+        try:
+            pct = max(0.0, min(1.0, getattr(self.companion.mood, "satiety", 0.0)))
+            bar.delete("all")
+            bar.create_rectangle(
+                0, 0, int(150 * pct), 12,
+                fill="#5BC98B" if pct < pet_food.FULL_AT else "#E8A33D",
+                outline="")
+            lbl = getattr(self, "_feed_pct_label", None)
+            if lbl is not None:
+                lbl.configure(text=f"{int(pct * 100)}%")
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _do_feed(self, fid: str) -> None:
         """喂一口指定的食物。"""
         if self.companion is None:
@@ -2861,15 +2883,14 @@ class PetApp:
         self.companion.save()
         self._play_sound("feed")
 
-        # 喂完刷新窗口上的饱足条
-        w = getattr(self, "_feed_win", None)
-        if w is not None:
-            try:
-                w.destroy()
-            except Exception:                            # noqa: BLE001
-                pass
-            self._feed_win = None
-            self._open_feed_window()
+        # 喂完**原地**刷新饱足条。
+        #
+        # 原来是 `w.destroy()` + `_open_feed_window()`，而那个函数
+        # 从不设 geometry —— 重建之后窗口从桌宠旁边跳到屏幕左上角
+        # （实测 (330,291) → (96,57)）。用户看到的是「点一下，窗口跑了」。
+        # 顺带丢了焦点、闪一下、快速连点会点到正在销毁的控件。
+        self._redraw_feed_bar()
+        self._feed_bar = getattr(self, "_feed_bar", None)
 
     def _feed(self):
         """快捷键 / 托盘用的：喂默认那一口（团子）。"""
