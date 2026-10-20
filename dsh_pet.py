@@ -33,6 +33,7 @@ from PIL import ImageTk                              # 皮肤预览要用
 
 import pet_activity
 import pet_mapping
+import pet_lint
 import pet_music
 import pet_petdex
 import pet_platform
@@ -163,6 +164,14 @@ class PetApp:
         self.companion = None if (args.demo or args.force_state or args.no_companion) \
             else CompanionSource()
         self.in_companion = False
+        # 「反复踩的坑」—— 读会话历史里的工具报错。
+        # **即使没有 DSH 也建**：历史文件在那儿，跟当前有没有任务无关。
+        self.lint = pet_lint.Linter().load()
+        self._lint_no_scan = False    # 测试用：关掉真扫盘（不然每条测试都读机器上的会话）
+        self._lint_no_scan = False    # 测试用：关掉真扫盘（不然每条测试都读机器上的会话）
+        self._lint_files = []         # 会话事件日志列表（定期刷新）
+        self._lint_refresh = 0.0      # 下次刷新文件列表的时刻
+        self._lint_last_err = ""      # 上一条报错（只在变化时才查）
         # 音乐 / 前台应用。**即使没有 DSH 也要建** —— 这正是"独立使用"的核心：
         # 没有 DSH 时她是靠这两个源过日子的，不是干等着。
         # --demo/--force-state 下不建（那是纯预览，不该受机器上放什么歌影响）。
@@ -2872,6 +2881,11 @@ class PetApp:
             except Exception:                            # noqa: BLE001
                 pass
         self._save_config()
+        if getattr(self, "lint", None) is not None:
+            try:
+                self.lint.save()                         # 攒的坑要留住
+            except Exception:                            # noqa: BLE001
+                pass
         if self.companion is not None:
             self.companion.save()                        # 记下这一程
         if getattr(self, "hotkeys", None) is not None:
@@ -2883,6 +2897,118 @@ class PetApp:
             self.root.destroy()
         except Exception:                                # noqa: BLE001
             pass
+
+    # -- 「反复踩的坑」 ------------------------------------------------------
+    def _lint_tick(self, snap) -> None:
+        """读你反复踩的坑。**每轮都调，不管哪条分支。**
+
+        挂在 `CompanionSource.poll()` 上会重演久坐提醒那次事故：那个函数
+        只在 DSH 空闲时跑，而**报错恰恰发生在你干活的时候**。
+
+        三件事：
+          1. 把历史**分片**扫完（每轮 20ms，不卡界面、也不起线程）
+          2. 有新报错 → 问 linter 认不认识
+          3. 认识就说话 —— 同一条一次运行只提一次
+
+        ## 为什么不用后台线程
+
+        第一版起了 `threading.Thread` 去扫，结果整条冒烟测试跑一半**硬崩**：
+
+            Tcl_AsyncDelete: async handler deleted by the wrong thread
+
+        退出码 `-2147483645`，没有 traceback，没有 `Ran N tests`。A/B 验过：
+        把线程关掉就不崩。
+
+        试过 `gc.disable()` 包住线程 —— **没用**。
+
+        改成在主线程上**分片**扫：每轮 `budget_s=0.02`，`scan()` 本身就
+        跳过已扫过的文件、超预算就停。85 个文件摊到几十轮里，用户感觉不到，
+        但也不用跟 Tk 的线程模型打交道。
+        """
+        if self.lint is None:
+            return
+
+        # 1. 分片扫。文件列表隔一会儿刷一次（新会话会冒出来）
+        if not self._lint_no_scan:
+            now = time.time()
+            if not self._lint_files or now >= self._lint_refresh:
+                self._lint_files = pet_lint.list_event_logs()
+                self._lint_refresh = now + 120
+            try:
+                if self.lint.scan(self._lint_files, budget_s=0.02):
+                    self.lint.save()
+            except Exception:                            # noqa: BLE001
+                pass
+
+        # 2. 只在**报错变了**的时候查 —— 不然同一个错每轮都算一次
+        err = getattr(snap, "error", "") or ""
+        if err == self._lint_last_err:
+            return
+        self._lint_last_err = err
+        if not err:
+            return
+
+        # 3. 认识吗
+        hit = self.lint.recall(err)
+        if hit is None or self.companion is None:
+            return
+        # **文案要短。** 第一版是「又踩到这个坑了：xxx（第 74 次）」，
+        # 量出来 219px，而卡片只有约 206px —— 渲出来是
+        # 「…cannot edit…（第 74 …」，次数被切掉了。
+        # 现在这条 143px 左右，留足余量。
+        short = self._short_sig(hit["sig"], 22)
+        text = (pet_i18n.t("又踩到这个坑：") + f"{short} "
+                + pet_i18n.t("{n} 次了").format(n=hit["n"]))
+        # `say()` 记的是陪伴状态，让**下一轮** decorate 接着贴；
+        # 但 decorate 在 _poll 里比这里**早**跑（L3053 vs L3100），
+        # 所以只 say 的话这一帧上不去。
+        # 两边都写：一个管持续，一个管这一帧。
+        # （规则 1 第四次事故就是「中间变量有值，最后没上屏」，这里一样。）
+        self.companion.say(text, 6.0, important=True)
+        snap.detail_line = text
+        snap.bubble = True
+
+    @staticmethod
+    def _short_sig(sig: str, n: int = 42) -> str:
+        """签名缩短一点再放气泡里。
+
+        **不在任意位置硬切** —— 优先在 `<str>` / `<path>` 这种占位符处断，
+        否则界面上会出现「edit requires reading <st」这种半截词
+        （AGENTS.md 规则 8）。
+        """
+        if len(sig) <= n:
+            return sig
+        for mark in (" <str>", " <path>", " <n>", " <hex>"):
+            at = sig.find(mark)
+            if 0 < at <= n:
+                return sig[:at] + "…"
+        cut = sig.rfind(" ", 0, n)
+        return (sig[:cut] if cut > 12 else sig[:n]).rstrip() + "…"
+
+    def _open_lint_report(self) -> None:
+        """「我踩过的坑…」窗口。**只有签名，没有原文。**"""
+        import tkinter as tk
+        from tkinter import ttk
+        win = tk.Toplevel(self.root)
+        win.title(pet_i18n.t("我踩过的坑"))
+        win.attributes("-topmost", True)
+        _style_settings(win)
+
+        body = ttk.Frame(win, padding=(14, 12))
+        body.pack(fill="both", expand=True)
+        text = tk.Text(body, width=64, height=16, wrap="word",
+                       font=("Consolas", 9), relief="flat",
+                       background="#FBFBFD", padx=8, pady=6)
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", pet_lint.format_report(self.lint))
+        text.configure(state="disabled")
+
+        bar = ttk.Frame(win, padding=(14, 0, 14, 12))
+        bar.pack(fill="x")
+        ttk.Label(bar, text=pet_i18n.t("只记形状，不存你的代码和路径。"),
+                  style="Dim.TLabel").pack(side="left")
+        ttk.Button(bar, text=pet_i18n.t("关闭"), width=9,
+                   command=win.destroy).pack(side="right")
 
     # -- 循环 ---------------------------------------------------------------
     def _poll(self):
@@ -2990,6 +3116,13 @@ class PetApp:
             self._health_tick()
         except Exception as exc:                         # noqa: BLE001
             log_error("健康提醒异常", exc)
+        # 「反复踩的坑」—— 和健康提醒同样的位置和理由：
+        # **三条路径都要经过这里**。挂在 CompanionSource.poll() 上会重演
+        # 「你越忙她越不提醒」那个事故（报错恰恰发生在你干活的时候）。
+        try:
+            self._lint_tick(self.snap)
+        except Exception as exc:                         # noqa: BLE001
+            log_error("踩坑统计异常", exc)
         try:
             self._autohide_tick()
         except Exception as exc:                         # noqa: BLE001

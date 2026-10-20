@@ -112,6 +112,8 @@ class E2EBase(unittest.TestCase):
         app = P.PetApp(args)
         self._apps.append(app)
         app.root.update()
+        # 别真扫会话历史 —— 慢，而且依赖机器上有多少文件（规则 6）
+        app._lint_no_scan = True
         return app
 
     def capture(self, app, ticks: int = 1, poll: bool = True):

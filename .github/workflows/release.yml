@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 # 打 tag 就自动构建 exe 并发 Release —— 不用手工跑 build_exe.py 再传。
 # 用法：

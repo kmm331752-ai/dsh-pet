@@ -86,6 +86,8 @@ class TestAppSmoke(unittest.TestCase):
     def _app(self, **kw):
         """建一个 PetApp，返回 (app, 清理函数)。"""
         app = P.PetApp(self._args(**kw))
+        # 别真扫会话历史 —— 慢，而且依赖机器上有多少文件（规则 6）
+        app._lint_no_scan = True
         self.addCleanup(lambda: self._safe_quit(app))
         return app
 

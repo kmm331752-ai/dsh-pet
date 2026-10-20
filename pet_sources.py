@@ -495,7 +495,7 @@ class StatusWatcher:
             tool_names=primary.tool_names, context_pct=primary.context_pct,
             surface_tokens=primary.surface_tokens, context_window=primary.context_window,
             tokens_out=primary.tokens_out, prompt=primary.prompt,
-            slow_tools=primary.slow_tools)
+            slow_tools=primary.slow_tools, error=primary.error)
 
         # 完成通知：说得出是哪个会话跑完了，而不是笼统的"任务已完成"。
         # 只在庆祝刚开始的那几秒里说，不然会一直挂着。

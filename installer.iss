@@ -1,4 +1,4 @@
-﻿; DSH 桌宠的安装包脚本（Inno Setup 6）
+; DSH 桌宠的安装包脚本（Inno Setup 6）
 ;
 ; 用法：
 ;   1. 先跑 python build_exe.py 生成 dist\DSH-Pet.exe
@@ -14,7 +14,7 @@
 
 #define AppName "DSH 桌宠"
 #define AppExe "DSH-Pet.exe"
-#define AppVersion "1.18.0"
+#define AppVersion "1.19.0"
 #define AppPublisher "kmm331752-ai"
 #define AppUrl "https://github.com/kmm331752-ai/dsh-pet"
 

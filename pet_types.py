@@ -101,6 +101,10 @@ class Snapshot:
     focus_x: float = 0.0                              # 非 0 时把窗口移到这个 x（等待提醒用）
     quiet: bool = False                               # 你在开会/专注时她闭嘴（音乐源和活动源决定）
     music: str = ""                                   # 正在放什么（"歌手 - 歌名"），空 = 没在放
+    # 主任务最近一次工具报错（一行摘要）。**一直有这个值，只是原来没抄进
+    # Snapshot** —— `Task.error` 填了，`_make_snapshot` 建 Snapshot 时丢了。
+    # 「反复踩的坑」那个功能要读它。
+    error: str = ""
 
     @property
     def elapsed_ms(self) -> Optional[float]:

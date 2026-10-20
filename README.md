@@ -435,6 +435,73 @@ Win32 —— 所以**音乐交互和前台感知这两块它做不到**，只能
 
 而**皮肤那条是白捡的** —— 契约已经兼容，不用额外做什么，就当多一个曝光渠道。
 
+## 🧠 她记得你反复踩的坑
+
+这是这个项目**唯一别人没有的东西**：她读得到你和 AI 协作的全部历史。
+这台机器上有 **86 个会话文件、275 条工具报错**。
+
+别的功能都是「一个桌宠做 X」—— 摸她、喂她、溜达、看任务状态，全是
+20 年前就有的形状。而这个不是。
+
+### 它做什么
+
+把你踩过的报错按**形状**聚起来，然后你又一次踩到的时候，她认得出来：
+
+![她说又踩到了](preview/lint-bubble.png)
+
+打开「我踩过的坑…」看全貌：
+
+![踩过的坑](preview/lint-report.png)
+
+### 实测（这台机器的真数据）
+
+```
+一共 276 条报错，聚成 45 种，其中 16 种反复出现。
+
+  74 次  cannot edit <str>: file changed since it was read
+  48 次  edit requires reading <str> first
+  38 次  cannot modify <str>: file has not been read
+  17 次  old_string was not found in <str>
+  12 次  ReplaceFileW EIO (Win32 <n>): <path>
+   9 次  glob search failed (exit <n>): rg: ./.pytest_cache: IO error …
+   8 次  old_string and new_string must differ
+   6 次  old_string matched <n> times in <str>; provide a more specific …
+```
+
+**前两名是同一个动作的两种顺序**：改了文件没重读就直接编辑，或者编辑完
+文件又变了。**这两条加起来 112 次。**
+
+### 隐私：只记形状，不存你的东西
+
+会话文件里有你的提示词、你的代码、你的路径。**这个功能一个字都不存。**
+
+存下来的只有归一化后的形状：
+
+```
+edit requires reading <str> first
+```
+
+路径变 `<path>`、引号串变 `<str>`、数字变 `<n>`、破折号后面的说明砍掉。
+
+**连她自己的气泡里也不放路径和文件名** —— 有测试守着
+（`test_bubble_has_no_path`、`test_state_file_has_no_path`）。
+
+### 不需要 LLM
+
+纯统计。快、准、**不会编**。
+
+对比一下接本地模型的方案：模型会给你编出一条「你经常忘记保存」，
+而这条管线只会说「这个形状出现了 74 次」，因为 74 是真数出来的。
+
+### 怎么判断「反复」
+
+**同一个形状出现 ≥ 3 次**才算。一次两次是手滑，报出来只会烦人。
+
+**而且同一次运行里同一条只提一次** —— 一个循环里连报 20 次的话，
+她不能变复读机。
+
+---
+
 ## 🏃 长跑测试
 
 单元测试和端到端都是**秒级**的，看不到"跑久了会怎样"。

@@ -97,6 +97,18 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
+    "我踩过的坑…":
+        "Pitfalls…",
+
+    "又踩到这个坑：":
+        "Same pitfall again: ",
+    "{n} 次了":
+        " {n} times",
+    "我踩过的坑":
+        "Pitfalls I've seen",
+    "只记形状，不存你的代码和路径。":
+        "Shapes only — your code and paths are never stored.",
+
     "音乐":
         "Music",
     "陪伴":
