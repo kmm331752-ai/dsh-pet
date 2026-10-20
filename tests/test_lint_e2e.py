@@ -32,6 +32,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import pet_base as B  # noqa: E402
+import pet_i18n as I  # noqa: E402
 
 _TMP = None
 
@@ -111,7 +112,10 @@ class TestRecurringPitfallReachesTheSnapshot(LintE2EBase):
                    error='cannot edit "G:\\y\\b.vue": file changed since it was read')
         text = self._bubble_text(app)
         self.assertTrue(text, "她一句话都没说")
-        self.assertIn("又踩到", text)
+        # **断言翻译后的值，不钉语言** —— CI 是英文环境，钉死 "又踩到"
+        # 这条会挂（规则 6，第四次了）。签名是语言无关的，一起断。
+        self.assertIn(I.t("又踩到这个坑："), text)
+        self.assertIn("cannot edit", text)
 
     def test_oneoff_error_says_nothing(self):
         """**只出现过一次的坑不许报** —— 偶然手滑不是规律。"""
@@ -143,7 +147,11 @@ class TestRecurringPitfallReachesTheSnapshot(LintE2EBase):
         self._preload(app, 'Error: cannot edit "G:\\x\\a.vue": file changed since it was read', 5)
         err = 'cannot edit "G:\\y\\b.vue": file changed since it was read'
         self._stub(app, state="tools", error=err)
-        self.assertIn("又踩到", self._bubble_text(app))
+        # **断言翻译后的值，不钉语言** —— CI 是英文环境，钉死 "又踩到"
+        # 这条会挂（规则 6，这是第四次）。签名是语言无关的，一起断。
+        text = self._bubble_text(app)
+        self.assertIn(I.t("又踩到这个坑："), text)
+        self.assertIn("cannot edit", text)
         # 气泡过期，然后同一个错再来一轮
         app.companion.bubble_until = 0.0
         app.snap.detail_line = ""
@@ -163,8 +171,10 @@ class TestRecurringPitfallReachesTheSnapshot(LintE2EBase):
         self._preload(app, 'Error: cannot edit "G:\\x\\a.vue": file changed since it was read', 4)
         self._stub(app, state="tools",
                    error='cannot edit "G:\\y\\b.vue": file changed since it was read')
-        self.assertIn("又踩到", self._bubble_text(app),
+        text = self._bubble_text(app)
+        self.assertIn(I.t("又踩到这个坑："), text,
                       "DSH 忙的时候不提醒 —— 和久坐提醒同一个 bug")
+        self.assertIn("cannot edit", text)
 
 
 class TestPrivacy(LintE2EBase):
