@@ -80,6 +80,9 @@ class LintE2EBase(unittest.TestCase):
         # 依赖机器状态（规则 6）。这几条测的是"新报错来了她认不认得"，
         # 不需要真历史：计数由 `_preload` 直接灌。
         app._lint_no_scan = True
+        # git 也一样 —— 否则每条测试都去跑 `git log`，
+        # 又慢又依赖机器上有哪些仓库（规则 6）。
+        app._git_no_scan = True
         # **每个测试一份干净的 linter。**
         # 第一版共用 `data_dir` 下的同一个状态文件，于是前面测试攒的计数
         # 漏到后面 —— `test_oneoff_error_says_nothing` 拿到「第 5 次」。

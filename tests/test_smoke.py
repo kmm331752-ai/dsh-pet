@@ -88,6 +88,9 @@ class TestAppSmoke(unittest.TestCase):
         app = P.PetApp(self._args(**kw))
         # 别真扫会话历史 —— 慢，而且依赖机器上有多少文件（规则 6）
         app._lint_no_scan = True
+        # git 也一样 —— 否则每条测试都去跑 `git log`，
+        # 又慢又依赖机器上有哪些仓库（规则 6）。
+        app._git_no_scan = True
         self.addCleanup(lambda: self._safe_quit(app))
         return app
 

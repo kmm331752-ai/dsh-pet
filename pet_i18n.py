@@ -97,17 +97,32 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
-    "我踩过的坑…":
-        "Pitfalls…",
+    "她都看到了什么…":
+        "What she noticed…",
+    "她都看到了什么":
+        "What she noticed",
+    "踩过的坑":
+        "Pitfalls",
+    "工作形状":
+        "Work shape",
+    "需要 DSH 的会话日志才能统计。没有的话这段是空的。":
+        "Needs DSH session logs. Empty without DSH.",
+    "git 不可用。":
+        "git is not available.",
+    "只读形状和文件名，不读代码，不上传。":
+        "Reads shapes and file names only. No code, no upload.",
+    "代码目录":
+        "Code folders",
+    "她自己去找 git 仓库。找不到就填这里，多个用 ; 分隔。":
+        "She finds git repos herself. If she misses them, list folders here (separate with ;).",
+    "已保存，正在重新找仓库…":
+        "Saved. Re-scanning for repos…",
+
 
     "又踩到这个坑：":
         "Same pitfall again: ",
     "{n} 次了":
         " {n} times",
-    "我踩过的坑":
-        "Pitfalls I've seen",
-    "只记形状，不存你的代码和路径。":
-        "Shapes only — your code and paths are never stored.",
 
     "音乐":
         "Music",

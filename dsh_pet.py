@@ -33,6 +33,7 @@ from PIL import ImageTk                              # 皮肤预览要用
 
 import pet_activity
 import pet_mapping
+import pet_git
 import pet_lint
 import pet_music
 import pet_petdex
@@ -172,6 +173,10 @@ class PetApp:
         self._lint_files = []         # 会话事件日志列表（定期刷新）
         self._lint_refresh = 0.0      # 下次刷新文件列表的时刻
         self._lint_last_err = ""      # 上一条报错（只在变化时才查）
+        # 「你的工作形状」—— 读本地 git。**没装 DSH 也能用**，
+        # 这是让陌生人也能看到差异化功能的唯一途径。
+        self.git = pet_git.GitWatcher().load()
+        self._git_no_scan = False
         # 音乐 / 前台应用。**即使没有 DSH 也要建** —— 这正是"独立使用"的核心：
         # 没有 DSH 时她是靠这两个源过日子的，不是干等着。
         # --demo/--force-state 下不建（那是纯预览，不该受机器上放什么歌影响）。
@@ -318,6 +323,12 @@ class PetApp:
         # 但有一条测试专门查"读了但从不写回的键"—— 因为那种键最容易
         # 变成"改了重启就丢"。显式写出来也顺便当文档。
         cfg["mapping"] = self.cfg.get("mapping") or {}
+        # 「代码目录」—— 她在哪儿找 git 仓库。
+        # **同一个坑第二次**：第一版用「文件里有没有 `cfg["git_roots"]`」
+        # 判断要不要加，而那段字符串在**设置处理器**里（`self.cfg[...]`），
+        # 于是被判成"已有"，`_save_config` 里其实没有。
+        # 判「在不在对的位置」，不是「在不在文件里」。
+        cfg["git_roots"] = self.cfg.get("git_roots") or ""
         try:
             with open(config_path(), "w", encoding="utf-8") as fh:
                 json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -484,6 +495,11 @@ class PetApp:
         self.menu.add_command(label=t("和大肥鱼说话…") + " 💬", command=self._open_chat)
         self.menu.add_command(label=t("刚才错在哪…") + " 🩺",
                               command=self._show_last_error)
+        # **这一行第一版漏了。** 加它的脚本用「文件里有没有这个字符串」
+        # 判重，而那个字符串已经在报告窗口的 docstring 里 —— 注定跳过。
+        # 结果：功能做完了，但没有入口。
+        self.menu.add_command(label=t("她都看到了什么…") + " 🧠",
+                              command=self._open_lint_report)
         self.menu.add_command(label=t("检查更新…") + " 🔄",
                               command=self._check_update_async)
         self.menu.add_separator()
@@ -790,6 +806,40 @@ class PetApp:
                 row=row, column=0, sticky="w", padx=(16, 4), pady=1)
             ttk.Label(t_beh, text=what).grid(row=row, column=1, sticky="w", pady=1)
             row += 1
+
+        ttk.Separator(t_beh, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=16, pady=10)
+        row += 1
+        # **这一项是「没有 DSH 也能用」的关键。** 默认只扫常见目录，
+        # 而别人的代码放哪我不知道 —— 猜不如问。
+        ttk.Label(t_beh, text=t("代码目录"), style="Head.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 2))
+        row += 1
+        ttk.Label(t_beh,
+                  text=t("她自己去找 git 仓库。找不到就填这里，多个用 ; 分隔。"),
+                  style="Dim.TLabel", wraplength=320, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=16)
+        row += 1
+        v_roots = tk.StringVar(value=self.cfg.get("git_roots") or "")
+        roots_row = ttk.Frame(t_beh)
+        roots_row.grid(row=row, column=0, columnspan=2, sticky="ew",
+                       padx=16, pady=(4, 0))
+        e_roots = ttk.Entry(roots_row, textvariable=v_roots, width=40)
+        e_roots.pack(side="left", fill="x", expand=True)
+
+        def save_roots():
+            self.cfg["git_roots"] = v_roots.get().strip()
+            self._save_config()
+            if self.git is not None:
+                # 换了目录要重新找 —— 清掉候选和已扫记录
+                self.git.roots = pet_git.extra_roots() or None
+                self.git._candidates = []
+                self.git.scanned.clear()
+            status.configure(text=t("已保存，正在重新找仓库…"), style="Good.TLabel")
+
+        ttk.Button(roots_row, text=t("保存"), width=7,
+                   command=save_roots).pack(side="left", padx=(6, 0))
+        row += 1
 
         # ══ 外观 ════════════════════════════════════════════════════════════
         t_look = ttk.Frame(nb, padding=(0, 8))
@@ -2886,6 +2936,11 @@ class PetApp:
                 self.lint.save()                         # 攒的坑要留住
             except Exception:                            # noqa: BLE001
                 pass
+        if getattr(self, "git", None) is not None:
+            try:
+                self.git.save()
+            except Exception:                            # noqa: BLE001
+                pass
         if self.companion is not None:
             self.companion.save()                        # 记下这一程
         if getattr(self, "hotkeys", None) is not None:
@@ -2985,27 +3040,64 @@ class PetApp:
         cut = sig.rfind(" ", 0, n)
         return (sig[:cut] if cut > 12 else sig[:n]).rstrip() + "…"
 
+    def _git_tick(self) -> None:
+        """扫一点本地 git。**每轮 20ms，主线程分片。**
+
+        和 `_lint_tick` 同一个形状 —— lint 那版起过后台线程，把整条冒烟
+        测试跑崩了（`Tcl_AsyncDelete`），这里不重犯。
+        """
+        if self.git is None or self._git_no_scan:
+            return
+        try:
+            if self.git.refresh(budget_s=0.02):
+                self.git.save()
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _open_lint_report(self) -> None:
-        """「我踩过的坑…」窗口。**只有签名，没有原文。**"""
+        """「她都看到了什么…」—— **两个来源一个窗口。**
+
+        「踩过的坑」（DSH 会话）和「工作形状」（git）回答的是同一个问题。
+        分成两个菜单项会让人觉得是两个功能，其实是一件事的两个数据源。
+
+        没装 DSH 的人，第一段会诚实地说"需要 DSH"，第二段照常给结果。
+        """
         import tkinter as tk
         from tkinter import ttk
         win = tk.Toplevel(self.root)
-        win.title(pet_i18n.t("我踩过的坑"))
+        win.title(pet_i18n.t("她都看到了什么"))
         win.attributes("-topmost", True)
         _style_settings(win)
 
-        body = ttk.Frame(win, padding=(14, 12))
-        body.pack(fill="both", expand=True)
-        text = tk.Text(body, width=64, height=16, wrap="word",
-                       font=("Consolas", 9), relief="flat",
-                       background="#FBFBFD", padx=8, pady=6)
-        text.pack(fill="both", expand=True)
-        text.insert("1.0", pet_lint.format_report(self.lint))
-        text.configure(state="disabled")
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=12, pady=(12, 4))
+
+        def page(title, text):
+            f = ttk.Frame(nb, padding=(0, 8))
+            nb.add(f, text="  " + title + "  ")
+            box = tk.Text(f, width=64, height=15, wrap="word",
+                          font=("Consolas", 9), relief="flat",
+                          background="#FBFBFD", padx=8, pady=6)
+            box.pack(fill="both", expand=True, padx=12)
+            box.insert("1.0", text)
+            box.configure(state="disabled")
+            return f
+
+        # ① 踩过的坑（需要 DSH）
+        if self.lint is None or not self.lint.sigs:
+            lint_text = pet_i18n.t("需要 DSH 的会话日志才能统计。没有的话这段是空的。")
+        else:
+            lint_text = pet_lint.format_report(self.lint)
+        page(pet_i18n.t("踩过的坑"), lint_text)
+
+        # ② 工作形状（需要 git，**不需要 DSH**）
+        git_text = pet_git.format_report(self.git) if self.git is not None \
+            else pet_i18n.t("git 不可用。")
+        page(pet_i18n.t("工作形状"), git_text)
 
         bar = ttk.Frame(win, padding=(14, 0, 14, 12))
         bar.pack(fill="x")
-        ttk.Label(bar, text=pet_i18n.t("只记形状，不存你的代码和路径。"),
+        ttk.Label(bar, text=pet_i18n.t("只读形状和文件名，不读代码，不上传。"),
                   style="Dim.TLabel").pack(side="left")
         ttk.Button(bar, text=pet_i18n.t("关闭"), width=9,
                    command=win.destroy).pack(side="right")
@@ -3123,6 +3215,12 @@ class PetApp:
             self._lint_tick(self.snap)
         except Exception as exc:                         # noqa: BLE001
             log_error("踩坑统计异常", exc)
+        # 读 git 的工作形状。**每轮都调，不管有没有 DSH** ——
+        # 这正是"没有 DSH 也能用"的那一半。
+        try:
+            self._git_tick()
+        except Exception as exc:                         # noqa: BLE001
+            log_error("git 感知异常", exc)
         try:
             self._autohide_tick()
         except Exception as exc:                         # noqa: BLE001
