@@ -10,9 +10,44 @@
 
 ![她会转头看你](preview/demo-gaze.gif)
 
-![她的一天](preview/demo.gif)
+<sub>上面这段是**真渲染的帧**拼的（`tools/make_demo_gif.py`），不是画的示意图。
+[她的一天 →](preview/demo.gif)</sub>
 
-<sub>上面两段是**真渲染的帧**拼的（`tools/make_demo_gif.py`），不是画的示意图。</sub>
+---
+
+## 🧠 但她有一件别的桌宠做不到的事
+
+**她读得到你和 AI 协作的全部历史。**
+
+这台机器上 **86 个会话文件、279 条工具报错** —— 她把它们按形状聚起来，
+**你再一次踩到同一个坑的时候，她认得出来**。
+
+![她知道你踩过哪些坑](preview/lint-bubble.png)
+
+而聚出来的结果是这样的：
+
+```
+一共 279 条报错，聚成 45 种，其中 17 种反复出现。
+
+  74 次  cannot edit <str>: file changed since it was read
+  48 次  edit requires reading <str> first
+  40 次  cannot modify <str>: file has not been read
+  17 次  old_string was not found in <str>
+  12 次  ReplaceFileW EIO (Win32 <n>): <path>
+   8 次  old_string and new_string must differ
+```
+
+**最靠前那三条是同一件事的三种顺序**，加起来 162 条。加上两条同类的
+（`cannot overwrite ... without reading it first`、`cannot write ...: file changed`），
+一共 **168 条 —— 占全部报错的 60%**：
+
+> 编辑文件之前必须先读它，而读完之后文件不能变。
+
+[完整结果截图](preview/lint-report.png) ·
+[她怎么做的](#-她记得你反复踩的坑) ·
+[一篇更长的文章](docs/article-lint.md)
+
+---
 
 ![十三种状态](preview/states-13.png)
 
