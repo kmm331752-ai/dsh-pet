@@ -58,3 +58,6 @@ preview/_*.png
 
 # 对话记录 + 她记得的事
 pet_chat_memory.json
+# 「踩过的坑」和「工作形状」的统计状态（本地攒的，不该进仓库）
+pet_lint.json
+pet_git.json
