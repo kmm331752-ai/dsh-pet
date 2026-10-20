@@ -97,6 +97,34 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
+    "音乐":
+        "Music",
+    "陪伴":
+        "Companion",
+
+    "查看更新":
+        "Check for updates",
+    "版本":
+        "Version",
+    "喂食":
+        "Feed",
+    "设置":
+        "Settings",
+    "滚轮":
+        "Scroll",
+    "缩放":
+        "Resize",
+    "双击":
+        "Double-click",
+    "打开设置":
+        "Open settings",
+    "甩动 / 长按":
+        "Shake / hold",
+    "有惊喜":
+        "Surprise",
+    "单文件 Python + Pillow，没有网络请求，没有遥测。":
+        "Single-file Python + Pillow. No network requests, no telemetry.",
+
     "外观":
         "Appearance",
     "对话":
@@ -111,8 +139,6 @@ EN = {
         "Connect a local model to talk to her. Optional.",
     "热键":
         "Hotkeys",
-    "Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置 · +M 播放暂停\n滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜":
-        "Ctrl+Alt+P show/hide · +F feed · +S settings · +M play/pause\nScroll to resize · double-click opens this window · shake/hold for surprises",
 
     "状态 → 动画":
         "State → animation",

@@ -77,6 +77,44 @@ def _short_name(name: str, limit: int = 16) -> str:
     return head.rstrip() + "…"
 
 
+
+def _style_settings(win) -> None:
+    """设置窗口的 ttk 外观。
+
+    **字体只在 Style 上设一次** —— 每个控件各写一遍 `font=` 的话，
+    改个字号要改十几处，而且总会漏掉一两个。
+
+    主题优先 `vista`（Windows 原生现代外观）；没有就退 `clam`，
+    再没有就随便 —— 不能因为主题名不存在就把设置窗口整个建不出来。
+    """
+    from tkinter import ttk
+    st = ttk.Style(win)
+    for name in ("vista", "winnative", "clam", "default"):
+        try:
+            st.theme_use(name)
+            break
+        except Exception:                                # noqa: BLE001
+            continue
+    base = ("Microsoft YaHei UI", 9)
+    st.configure(".", font=base)
+    st.configure("TLabel", font=base, background="#F0F0F0")
+    st.configure("TFrame", background="#F0F0F0")
+    st.configure("TCheckbutton", font=base, background="#F0F0F0")
+    st.configure("Head.TLabel", font=("Microsoft YaHei UI", 10, "bold"))
+    st.configure("Dim.TLabel", foreground="#7A8296")
+    st.configure("Good.TLabel", foreground="#2E9E63")
+    st.configure("Bad.TLabel", foreground="#B93B37")
+    st.configure("Link.TLabel", foreground="#2A6FD6")
+    # **键名要醒目，不能比右边的说明还淡** —— 第一版用 #4A5266，
+    # 截图上看着像禁用状态。
+    st.configure("Key.TLabel", foreground="#1F2430",
+                 font=("Consolas", 9, "bold"))
+    try:
+        st.configure("TNotebook.Tab", padding=(12, 5))
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 class PetApp:
     def __init__(self, args):
         import tkinter as tk
@@ -334,9 +372,14 @@ class PetApp:
         self._build_menu()
 
     def _build_menu(self) -> None:
-        """建右键菜单。抽出来是为了切语言时能整个重建 ——
-        Tk 的菜单项文字建完就改不了（entryconfigure 能改 label，
-        但级联子菜单和 radiobutton 的变量要一起重做，不如重建干净）。
+        """建右键菜单。**分组，不平铺。**
+
+        原来 30 个顶层项、6 条分隔线，右键一下弹出一整屏文字 ——
+        **得读完 30 项才能找到要的那个**。现在 9 项 + 5 个子菜单。
+
+        抽成独立方法是為了切语言时能整个重建 —— Tk 的菜单项文字建完就
+        改不了（entryconfigure 能改 label，但级联子菜单和 radiobutton
+        的变量要一起重做，不如重建干净）。
         """
         r = self.root
         if getattr(self, "menu", None) is not None:
@@ -345,42 +388,28 @@ class PetApp:
             except Exception:                            # noqa: BLE001
                 pass
         self.menu = self.tk.Menu(r, tearoff=0)
+
+        # ── 最常用的放最上面，不进子菜单 ──
         self.menu.add_command(label=t("喂她吃点什么") + " 🍡",
                               command=self._open_feed_window)
-        # 音乐控制。**没在放歌时整组隐藏**（在 _on_menu 里动态改）——
+        self.menu.add_separator()
+
+        # ── 音乐 ──
+        # **没在放歌时整组灰掉**（在 _on_menu 里动态改）——
         # 平时用不到的菜单项是噪音。
-        self.menu.add_separator()
-        self.menu.add_command(label=t("播放") + " / " + t("暂停") + " ⏯",
-                              command=lambda: self._music_cmd("toggle"))
-        self.menu.add_command(label=t("下一首") + " ⏭",
-                              command=lambda: self._music_cmd("next"))
-        self.menu.add_command(label=t("上一首") + " ⏮",
-                              command=lambda: self._music_cmd("prev"))
-        self.menu.add_command(label=t("现在在放什么…"),
-                              command=self._show_now_playing)
-        self.menu.add_separator()
-        self.menu.add_command(label=t("展开详情") + "/" + t("收起详情"), command=self._toggle_detail)
-        self.menu.add_separator()
-        self.menu.add_command(label=t("自动跟随活跃会话"), command=self._follow_auto)
-        self.menu.add_command(label=t("复制会话 ID"), command=self._copy_sid)
-        self.menu.add_separator()
-        self.var_privacy = self.tk.BooleanVar(value=self.privacy)
-        self.var_sound = self.tk.BooleanVar(value=self.sound)
-        self.var_companion = self.tk.BooleanVar(
-            value=self.companion is not None and bool(self.cfg.get("companion", True)))
-        self.menu.add_checkbutton(label=t("隐私模式（隐藏标题与提示词）"),
-                                  variable=self.var_privacy, command=self._toggle_privacy)
-        self.menu.add_checkbutton(label=t("任务完成时提示音"),
-                                  variable=self.var_sound, command=self._toggle_sound)
-        self.menu.add_checkbutton(label=t("陪伴模式（没任务时自己过日子）"),
-                                  variable=self.var_companion, command=self._toggle_companion)
-        self.var_focus = self.tk.BooleanVar(value=self.focus_mode)
-        self.menu.add_checkbutton(label=t("专注模式（安静待机不打扰）"),
-                                  variable=self.var_focus, command=self._toggle_focus)
-        self.var_autohide = self.tk.BooleanVar(value=self._autohide)
-        self.menu.add_checkbutton(label=t("贴边自动隐藏（鼠标靠近才出来）"),
-                                  variable=self.var_autohide, command=self._toggle_autohide)
-        self.menu.add_separator()
+        self._music_menu = self.tk.Menu(self.menu, tearoff=0)
+        self._music_menu.add_command(label=t("播放") + " / " + t("暂停") + " ⏯",
+                                     command=lambda: self._music_cmd("toggle"))
+        self._music_menu.add_command(label=t("上一首") + " ⏮",
+                                     command=lambda: self._music_cmd("prev"))
+        self._music_menu.add_command(label=t("下一首") + " ⏭",
+                                     command=lambda: self._music_cmd("next"))
+        self._music_menu.add_separator()
+        self._music_menu.add_command(label=t("现在在放什么…"),
+                                     command=self._show_now_playing)
+        self.menu.add_cascade(label=t("音乐") + " ⏯", menu=self._music_menu)
+
+        # ── 番茄钟 ──
         self._pomo_menu = self.tk.Menu(self.menu, tearoff=0)
         for mins in POMODORO_CHOICES:
             self._pomo_menu.add_command(label=f"{mins} {t('分钟')}",
@@ -388,21 +417,101 @@ class PetApp:
         self._pomo_menu.add_separator()
         self._pomo_menu.add_command(label=t("取消计时"), command=self._cancel_pomodoro)
         self.menu.add_cascade(label=t("番茄钟") + " 🍅", menu=self._pomo_menu)
-        self.menu.add_separator()
-        self._skin_menu = self.tk.Menu(self.menu, tearoff=0)
-        self.menu.add_cascade(label=t("皮肤"), menu=self._skin_menu)
+
+        # ── 陪伴（行为开关都归这儿）──
+        self._comp_menu = self.tk.Menu(self.menu, tearoff=0)
+        self.var_companion = self.tk.BooleanVar(
+            value=self.companion is not None and bool(self.cfg.get("companion", True)))
+        self.var_focus = self.tk.BooleanVar(value=self.focus_mode)
+        self.var_autohide = self.tk.BooleanVar(value=self._autohide)
+        self.var_privacy = self.tk.BooleanVar(value=self.privacy)
+        self.var_sound = self.tk.BooleanVar(value=self.sound)
+        self._comp_menu.add_checkbutton(label=t("陪伴模式（没任务时自己过日子）"),
+                                        variable=self.var_companion,
+                                        command=self._toggle_companion)
+        self._comp_menu.add_checkbutton(label=t("专注模式（安静待机不打扰）"),
+                                        variable=self.var_focus,
+                                        command=self._toggle_focus)
+        self._comp_menu.add_checkbutton(label=t("贴边自动隐藏（鼠标靠近才出来）"),
+                                        variable=self.var_autohide,
+                                        command=self._toggle_autohide)
+        self._comp_menu.add_separator()
+        self._comp_menu.add_checkbutton(label=t("隐私模式（隐藏标题与提示词）"),
+                                        variable=self.var_privacy,
+                                        command=self._toggle_privacy)
+        self._comp_menu.add_checkbutton(label=t("任务完成时提示音"),
+                                        variable=self.var_sound,
+                                        command=self._toggle_sound)
+        self.menu.add_cascade(label=t("陪伴") + " 🎭", menu=self._comp_menu)
+
+        # ── 外观 ──
+        self._look_menu = self.tk.Menu(self.menu, tearoff=0)
+        self._skin_menu = self.tk.Menu(self._look_menu, tearoff=0)
+        self._look_menu.add_cascade(label=t("皮肤"), menu=self._skin_menu)
+        self._acc_menu = self.tk.Menu(self._look_menu, tearoff=0)
+        self._look_menu.add_cascade(label=t("配饰"), menu=self._acc_menu)
+        self._look_menu.add_separator()
+        self._look_menu.add_command(label=t("展开详情") + " / " + t("收起详情"),
+                                    command=self._toggle_detail)
+        self.menu.add_cascade(label=t("外观") + " 🎨", menu=self._look_menu)
         self._rebuild_skin_menu()
-        self._acc_menu = self.tk.Menu(self.menu, tearoff=0)
-        self.menu.add_cascade(label=t("配饰"), menu=self._acc_menu)
         self._rebuild_acc_menu()
+
         self.menu.add_separator()
-        self.menu.add_command(label=t("设置…"), command=self._open_settings)
-        self.menu.add_command(label=t("和大肥鱼说话…"), command=self._open_chat)
-        self.menu.add_command(label=t("导出相处记录…"), command=self._export_record)
-        self.menu.add_command(label=t("导出周报…"), command=self._export_week)
-        self.menu.add_command(label=t("刚才错在哪…"), command=self._show_last_error)
-        self.menu.add_command(label=t("检查更新…"), command=self._check_update_async)
+
+        # ── 会话（看和导出的东西）──
+        self._sess_menu = self.tk.Menu(self.menu, tearoff=0)
+        self._sess_menu.add_command(label=t("自动跟随活跃会话"), command=self._follow_auto)
+        self._sess_menu.add_command(label=t("复制会话 ID"), command=self._copy_sid)
+        self._sess_menu.add_separator()
+        self._sess_menu.add_command(label=t("导出相处记录…"), command=self._export_record)
+        self._sess_menu.add_command(label=t("导出周报…"), command=self._export_week)
+        self.menu.add_cascade(label=t("会话") + " 📋", menu=self._sess_menu)
+
+        self.menu.add_separator()
+
+        # ── 零散的 ──
+        self.menu.add_command(label=t("设置…") + " ⚙", command=self._open_settings)
+        self.menu.add_command(label=t("和大肥鱼说话…") + " 💬", command=self._open_chat)
+        self.menu.add_command(label=t("刚才错在哪…") + " 🩺",
+                              command=self._show_last_error)
+        self.menu.add_command(label=t("检查更新…") + " 🔄",
+                              command=self._check_update_async)
+        self.menu.add_separator()
         self.menu.add_command(label=t("退出"), command=self._quit)
+
+    @staticmethod
+    def _menu_entries(menu):
+        """**递归**遍历整棵菜单树，产出 (所属菜单, 序号, 类型)。
+
+        `_on_menu` 要按标签灰掉音乐项，测试要断言菜单里有某个标签 ——
+        两边都得看**所有层级**。
+
+        原来两边都只遍历顶层 `command`，所以把项挪进子菜单会同时打断
+        它们。（测试本来就不该关心菜单是平铺还是嵌套的。）
+        """
+        for i in range(menu.index("end") + 1 if menu.index("end") is not None else 0):
+            try:
+                kind = menu.type(i)
+            except Exception:                            # noqa: BLE001
+                continue
+            yield menu, i, kind
+            if kind == "cascade":
+                try:
+                    sub = menu.nametowidget(menu.entrycget(i, "menu"))
+                except Exception:                        # noqa: BLE001
+                    continue
+                yield from PetApp._menu_entries(sub)
+
+    def _all_menu_labels(self) -> list:
+        """整棵树上所有项的标签。"""
+        out = []
+        for m, i, _k in self._menu_entries(self.menu):
+            try:
+                out.append(m.entrycget(i, "label") or "")
+            except Exception:                            # noqa: BLE001
+                continue
+        return out
 
     def _rebuild_menus(self) -> None:
         """切语言后重建菜单。"""
@@ -550,13 +659,13 @@ class PetApp:
 
     # -- 设置窗口 -----------------------------------------------------------
     def _open_settings(self) -> None:
-        """设置窗口。**四个 Tab。**
+        """设置窗口。**四个 Tab，全 ttk。**
 
-        原来是扁平长列表，891px = 屏高的 82%，而且没有滚动 ——
-        小屏笔记本上底部的按钮点不到。分 Tab 之后每页都短。
+        原生 `tk.*` 控件是 Win95 那种灰，和这个项目别的窗口不搭。
+        `ttk` + `theme_use("vista")` 在 Windows 上是原生现代外观。
 
-        顺带把「动画映射」「宠物库」两个按钮挪进它们所属的**外观**页：
-        原来它们挂在最下面，中间隔着「本地对话」和「相处记录」。
+        字体统一在 `ttk.Style` 上设一次 —— 每个控件各写一遍 font 的话，
+        改了字号要改十几处。
         """
         tk = self.tk
         from tkinter import ttk
@@ -573,18 +682,17 @@ class PetApp:
         win.title(t("DSH 桌宠 · 设置"))
         win.resizable(False, False)
         win.attributes("-topmost", True)
-        # 这些参数是给 grid() 的 —— 左对齐要写 sticky，不是 anchor。
-        # 写成 anchor 会让第一个 Checkbutton 就抛 TclError，
-        # 整个设置窗口建不起来（而且异常被 Tk 吞在回调里，看着就是"点了没反应"）。
-        pad = dict(padx=14, pady=5, sticky="w")
-        WIDE = dict(padx=14, pady=4, sticky="ew")
+        _style_settings(win)
 
         nb = ttk.Notebook(win)
-        nb.pack(fill="both", expand=True, padx=12, pady=(12, 4))
+        nb.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+
+        PAD = dict(padx=16, pady=5, sticky="w")
+        WIDE = dict(padx=16, pady=4, sticky="ew")
 
         # ══ 行为 ════════════════════════════════════════════════════════════
-        t_beh = tk.Frame(nb)
-        nb.add(t_beh, text=t("行为"))
+        t_beh = ttk.Frame(nb, padding=(0, 8))
+        nb.add(t_beh, text="  " + t("行为") + "  ")
         row = 0
 
         v_comp = tk.BooleanVar(value=self.companion is not None)
@@ -608,36 +716,32 @@ class PetApp:
             ok = set_autostart(v_auto.get())
             if not ok:
                 v_auto.set(autostart_enabled())
-                status.configure(text=t("设置开机自启失败（见控制台）"), fg="#B93B37")
+                status.configure(text=t("设置开机自启失败（见控制台）"),
+                                 style="Bad.TLabel")
 
-        tk.Checkbutton(t_beh, text=t("陪伴模式（DSH 没任务时自己过日子）"),
-                       variable=v_comp, command=apply_companion).grid(
-            row=row, column=0, columnspan=2, **pad)
-        row += 1
-        tk.Checkbutton(t_beh, text=t("任务完成时提示音"), variable=v_sound,
-                       command=apply_sound).grid(row=row, column=0, columnspan=2, **pad)
-        row += 1
-        tk.Checkbutton(t_beh, text=t("隐私模式（隐藏标题与提示词）"), variable=v_priv,
-                       command=apply_priv).grid(row=row, column=0, columnspan=2, **pad)
-        row += 1
-        tk.Checkbutton(t_beh, text=t("开机自启"), variable=v_auto,
-                       command=apply_auto).grid(row=row, column=0, columnspan=2, **pad)
-        row += 1
-        tk.Frame(t_beh, height=1, bg="#DDD").grid(
-            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=8)
+        for text, var, cmd in (
+                (t("陪伴模式（DSH 没任务时自己过日子）"), v_comp, apply_companion),
+                (t("任务完成时提示音"), v_sound, apply_sound),
+                (t("隐私模式（隐藏标题与提示词）"), v_priv, apply_priv),
+                (t("开机自启"), v_auto, apply_auto)):
+            ttk.Checkbutton(t_beh, text=text, variable=var,
+                            command=cmd).grid(row=row, column=0, columnspan=2, **PAD)
+            row += 1
+
+        ttk.Separator(t_beh, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=16, pady=10)
         row += 1
 
         # 语言。切换后要重建界面才生效 —— Tk 的菜单文字改不了，
         # 只能重建菜单；设置窗口自己重建一次即可。
         #
         # **下拉框的值是显示用的 label，这里反查回 key。**
-        # 第一版传的是 LANGS 的 key，界面上显示 `auto` 而不是「跟随系统」——
-        # 和宠物库那个是一模一样的 bug（定义了 LANG_LABELS 却没用上）。
+        # 第一版传的是 LANGS 的 key，界面上显示 `auto` 而不是「跟随系统」。
         LANG_LABELS = [(k, pet_i18n.LANG_LABELS.get(k, k)) for k in pet_i18n.LANGS]
         LANG_BY_LABEL = {lbl: k for k, lbl in LANG_LABELS}
-        lang_row = tk.Frame(t_beh)
-        lang_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=6)
-        tk.Label(lang_row, text=t("语言")).pack(side="left")
+        lang_row = ttk.Frame(t_beh)
+        lang_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
+        ttk.Label(lang_row, text=t("语言")).pack(side="left")
         cur_lang = pet_i18n.LANG_LABELS.get(self.lang_pref, self.lang_pref)
         v_lang = tk.StringVar(value=cur_lang)
 
@@ -646,76 +750,95 @@ class PetApp:
             self.lang = pet_i18n.set_language(self.lang_pref)
             self._save_config()
             self._rebuild_menus()
-            # 设置窗口自己重建（不然标签还是旧语言）
             win.destroy()
             self._settings_win = None
             self._open_settings()
 
-        tk.OptionMenu(lang_row, v_lang, *[lbl for _, lbl in LANG_LABELS],
-                      command=apply_lang).pack(side="left", padx=(6, 0))
+        om = ttk.OptionMenu(lang_row, v_lang, v_lang.get(),
+                            *[lbl for _, lbl in LANG_LABELS], command=apply_lang)
+        om.configure(width=9)
+        om.pack(side="left", padx=(8, 0))
+        ttk.Label(t_beh, text=t("语言改了界面要重建一次。"),
+                  style="Dim.TLabel").grid(row=row + 1, column=0, columnspan=2,
+                                           sticky="w", padx=16)
+        row += 2
+
+        ttk.Separator(t_beh, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=16, pady=10)
         row += 1
-        tk.Label(t_beh, text=t("语言改了界面要重建一次。"), fg="#888").grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14)
+        ttk.Label(t_beh, text=t("热键"), style="Head.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
         row += 1
+        # 热键表：原来是一句话挤在一起，拆成两列好扫
+        for keys, what in (("Ctrl+Alt+P", t("显示 / 隐藏")),
+                           ("Ctrl+Alt+F", t("喂食")),
+                           ("Ctrl+Alt+S", t("设置")),
+                           ("Ctrl+Alt+M", t("播放 / 暂停")),
+                           (t("滚轮"), t("缩放")),
+                           (t("双击"), t("打开设置")),
+                           (t("甩动 / 长按"), t("有惊喜"))):
+            ttk.Label(t_beh, text=keys, width=12, style="Key.TLabel").grid(
+                row=row, column=0, sticky="w", padx=(16, 4), pady=1)
+            ttk.Label(t_beh, text=what).grid(row=row, column=1, sticky="w", pady=1)
+            row += 1
 
         # ══ 外观 ════════════════════════════════════════════════════════════
-        t_look = tk.Frame(nb)
-        nb.add(t_look, text=t("外观"))
+        t_look = ttk.Frame(nb, padding=(0, 8))
+        nb.add(t_look, text="  " + t("外观") + "  ")
         row = 0
 
-        skin_row = tk.Frame(t_look)
-        skin_row.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(8, 4))
-        tk.Label(skin_row, text=t("皮肤")).pack(side="left")
+        skin_row = ttk.Frame(t_look)
+        skin_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(4, 8))
+        ttk.Label(skin_row, text=t("皮肤")).pack(side="left")
         v_skin = tk.StringVar(value=self.skin.name)
         labels = {s["id"]: s["display"] for s in discover_skins()}
-        # 同上：OptionMenu 显示的是 id 对应的 display，值还是 id
-        om = tk.OptionMenu(skin_row, v_skin, *labels.keys(),
-                           command=lambda sid: self._switch_skin(sid))
+        om = ttk.OptionMenu(skin_row, v_skin, v_skin.get(), *labels.keys(),
+                            command=lambda sid: self._switch_skin(sid))
         om.configure(width=18)
-        om.pack(side="left", padx=(6, 0))
+        om.pack(side="left", padx=(8, 0))
         row += 1
 
         for text, cmd in ((t("动画映射（什么情况播什么）…"), self._open_mapping_window),
                           (t("宠物库（从 petdex 找一只来养）…"), self._open_petdex),
                           (t("皮肤预览（排一排点着换）…"), self._open_skin_preview)):
-            tk.Button(t_look, text=text, command=cmd).grid(
-                row=row, column=0, columnspan=2, **WIDE)
+            ttk.Button(t_look, text=text, command=cmd, width=34).grid(
+                row=row, column=0, columnspan=2, padx=16, pady=3, sticky="ew")
             row += 1
 
         # ══ 对话 ════════════════════════════════════════════════════════════
-        t_chat = tk.Frame(nb)
-        nb.add(t_chat, text=t("对话"))
+        t_chat = ttk.Frame(nb, padding=(0, 8))
+        nb.add(t_chat, text="  " + t("对话") + "  ")
         row = 0
 
-        tk.Label(t_chat, text=t("本地对话（可选）"),
-                 font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(10, 2))
+        ttk.Label(t_chat, text=t("本地对话（可选）"), style="Head.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(4, 2))
         row += 1
-        tk.Label(t_chat, text=t("接一个本地模型，就能和她说话。不填也能用。"),
-                 fg="#888", anchor="w").grid(row=row, column=0, columnspan=2,
-                                             sticky="w", padx=14)
+        ttk.Label(t_chat, text=t("接一个本地模型，就能和她说话。不填也能用。"),
+                  style="Dim.TLabel").grid(row=row, column=0, columnspan=2,
+                                           sticky="w", padx=16)
         row += 1
 
         v_url = tk.StringVar(value=self.chat_url)
         v_model = tk.StringVar(value=self.chat_model)
-        tk.Label(t_chat, text=t("地址（Ollama 默认 http://127.0.0.1:11434）"),
-                 anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
-                                             sticky="w", padx=14, pady=(6, 0))
+        ttk.Label(t_chat, text=t("地址（Ollama 默认 http://127.0.0.1:11434）"),
+                  style="Dim.TLabel").grid(row=row, column=0, columnspan=2,
+                                           sticky="w", padx=16, pady=(8, 0))
         row += 1
-        tk.Entry(t_chat, textvariable=v_url, width=34).grid(
-            row=row, column=0, columnspan=2, sticky="ew", padx=14)
+        ttk.Entry(t_chat, textvariable=v_url, width=36).grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=16)
         row += 1
-        tk.Label(t_chat, text=t("模型名（Ollama 用 ollama list 看）"),
-                 anchor="w", fg="#888").grid(row=row, column=0, columnspan=2,
-                                             sticky="w", padx=14, pady=(4, 0))
+        ttk.Label(t_chat, text=t("模型名（Ollama 用 ollama list 看）"),
+                  style="Dim.TLabel").grid(row=row, column=0, columnspan=2,
+                                           sticky="w", padx=16, pady=(6, 0))
         row += 1
-        tk.Entry(t_chat, textvariable=v_model, width=34).grid(
-            row=row, column=0, columnspan=2, sticky="ew", padx=14)
+        ttk.Entry(t_chat, textvariable=v_model, width=36).grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=16)
         row += 1
 
-        chat_status = tk.Label(t_chat, text="", anchor="w", fg="#666", wraplength=300,
-                               justify="left")
-        chat_status.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 0))
+        chat_status = ttk.Label(t_chat, text="", style="Dim.TLabel",
+                                wraplength=320, justify="left")
+        chat_status.grid(row=row, column=0, columnspan=2, sticky="w",
+                         padx=16, pady=(4, 0))
         row += 1
 
         def save_chat():
@@ -725,18 +848,20 @@ class PetApp:
             self.chat.model = self.chat_model
             self._save_config()
             if not self.chat.configured:
-                chat_status.configure(text=t("填完地址和模型才能用"), fg="#B93B37")
+                chat_status.configure(text=t("填完地址和模型才能用"),
+                                      style="Bad.TLabel")
             else:
                 chat_status.configure(
-                    text=t("已保存：") + f"{self.chat.model} @ {self.chat.base}", fg="#2E9E63")
+                    text=t("已保存：") + f"{self.chat.model} @ {self.chat.base}",
+                    style="Good.TLabel")
 
         def probe():
             """探一下端点，顺便把模型名列出来。"""
             url = v_url.get().strip()
             if not url:
-                chat_status.configure(text=t("先填地址"), fg="#B93B37")
+                chat_status.configure(text=t("先填地址"), style="Bad.TLabel")
                 return
-            chat_status.configure(text=t("正在连…"), fg="#666")
+            chat_status.configure(text=t("正在连…"), style="Dim.TLabel")
             win.update_idletasks()
 
             def work():
@@ -752,22 +877,22 @@ class PetApp:
 
             threading.Thread(target=work, name="dsh-pet-probe", daemon=True).start()
 
-        chatbar = tk.Frame(t_chat)
-        chatbar.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 6))
-        tk.Button(chatbar, text=t("保存"), command=save_chat).pack(side="left")
-        tk.Button(chatbar, text=t("测试连接"), command=probe).pack(side="left", padx=6)
-        tk.Button(chatbar, text=t("和大肥鱼说话…"),
-                  command=self._open_chat).pack(side="left")
+        chatbar = ttk.Frame(t_chat)
+        chatbar.grid(row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(8, 4))
+        ttk.Button(chatbar, text=t("保存"), command=save_chat, width=9).pack(side="left")
+        ttk.Button(chatbar, text=t("测试连接"), command=probe, width=11).pack(
+            side="left", padx=6)
+        ttk.Button(chatbar, text=t("和大肥鱼说话…"),
+                   command=self._open_chat).pack(side="left")
         row += 1
 
         # ══ 关于 ════════════════════════════════════════════════════════════
-        t_about = tk.Frame(nb)
-        nb.add(t_about, text=t("关于"))
+        t_about = ttk.Frame(nb, padding=(0, 8))
+        nb.add(t_about, text="  " + t("关于") + "  ")
         row = 0
 
-        tk.Label(t_about, text=t("相处记录"),
-                 font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(10, 2))
+        ttk.Label(t_about, text=t("相处记录"), style="Head.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(4, 4))
         row += 1
 
         m = self.companion.mood if self.companion else Mood()
@@ -775,15 +900,15 @@ class PetApp:
                 f"被戳 {m.pokes} 次 · 被拖 {m.drags} 次 · 被喂 {m.feeds} 次\n"
                 f"亲密度 {m.affection * 100:.0f}% · 精力 {m.energy * 100:.0f}%\n"
                 f"{m.schedule_text()}")
-        tk.Label(t_about, text=info, justify="left").grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 6))
+        ttk.Label(t_about, text=info, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 8))
         row += 1
 
         def reset_pos():
             dx, dy = default_position()
             self.root.geometry(f"{WIN_W}x{WIN_H}+{dx}+{dy}")
             self._save_config()
-            status.configure(text=t("位置已复位"), fg="#2E9E63")
+            status.configure(text=t("位置已复位"), style="Good.TLabel")
 
         def forget_me():
             if self.companion is not None:
@@ -794,30 +919,41 @@ class PetApp:
             self._settings_win = None
             self._open_settings()
 
-        btns = tk.Frame(t_about)
-        btns.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 6))
-        tk.Button(btns, text=t("位置复位"), command=reset_pos).pack(side="left")
-        tk.Button(btns, text=t("重置相处记录"), command=forget_me).pack(side="left", padx=6)
-        tk.Button(btns, text=t("出错日志"), command=self._show_error_log).pack(side="left")
+        btns = ttk.Frame(t_about)
+        btns.grid(row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 8))
+        ttk.Button(btns, text=t("位置复位"), command=reset_pos).pack(side="left")
+        ttk.Button(btns, text=t("重置相处记录"), command=forget_me).pack(
+            side="left", padx=6)
+        ttk.Button(btns, text=t("出错日志"), command=self._show_error_log).pack(side="left")
         row += 1
 
-        tk.Frame(t_about, height=1, bg="#DDD").grid(
-            row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=8)
+        ttk.Separator(t_about, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", padx=16, pady=8)
         row += 1
-        tk.Label(t_about, text=t("热键"), font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 2))
+        # 版本号原来**界面上没有** —— 只能看标题栏或去 release 页找。
+        # 报 bug 的时候第一个要问的就是这个。
+        ttk.Label(t_about, text=f"{t('版本')} {APP_VERSION}", style="Key.TLabel").grid(
+            row=row, column=0, sticky="w", padx=(16, 4))
+        # 链接文字用「查看更新」而不是整条 URL —— 那条又长又浅，
+        # 占一整行还不好点。
+        link = ttk.Label(t_about, text=t("查看更新"), style="Link.TLabel",
+                         cursor="hand2")
+        link.grid(row=row, column=1, sticky="w")
+        link.bind("<Button-1>", lambda _e: webbrowser.open(RELEASES_URL))
         row += 1
-        tk.Label(t_about, justify="left", fg="#777",
-                 text=t("Ctrl+Alt+P 显示/隐藏 · +F 喂食 · +S 设置 · +M 播放暂停\n"
-                        "滚轮缩放 · 双击开这个窗口 · 甩动/长按有惊喜")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+        ttk.Label(t_about, text=t("单文件 Python + Pillow，没有网络请求，没有遥测。"),
+                  style="Dim.TLabel", wraplength=320).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=16, pady=(4, 0))
         row += 1
 
         # ══ 底部条：状态 + 关闭（任何 Tab 下都看得见）════════════════════════
-        status = tk.Label(win, text="", fg="#666", anchor="w")
-        status.pack(fill="x", padx=14)
-        tk.Button(win, text=t("关闭"), width=10, command=lambda: (
-            win.destroy(), setattr(self, "_settings_win", None))).pack(pady=(4, 12))
+        status = ttk.Label(win, text="", style="Dim.TLabel", anchor="w")
+        status.pack(fill="x", padx=16, pady=(0, 0))
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=16, pady=(4, 14))
+        # 「关闭」**右对齐** —— 原来居中飘着，和内容没关系
+        ttk.Button(bar, text=t("关闭"), width=10, command=lambda: (
+            win.destroy(), setattr(self, "_settings_win", None))).pack(side="right")
 
     # -- 托盘图标 -----------------------------------------------------------
     def _start_tray(self) -> None:
@@ -2685,21 +2821,30 @@ class PetApp:
         self._card_cache = (None, None)
         self._save_config()
 
-    def _on_menu(self, e):
-        # 没在放歌就把音乐那几项灰掉 —— 用不到的菜单项是噪音
+    def _refresh_music_menu_state(self) -> None:
+        """没在放歌就把音乐那几项灰掉 —— 用不到的菜单项是噪音。
+
+        **和"把菜单弹出来"分开** —— 那个是 `tk_popup`，会**阻塞等用户
+        输入**。挤在一起的话，想测"灰没灰"就得真的弹一次菜单，测试里
+        没人点，于是卡到超时（实测 175 秒）。
+        """
         ready = self._music_ready()
-        for idx in range(self.menu.index("end") + 1):
+        # **递归遍历整棵树** —— 音乐项在子菜单里，只看顶层会漏掉。
+        for m, idx, kind in self._menu_entries(self.menu):
             try:
-                if self.menu.type(idx) != "command":
+                if kind != "command":
                     continue
-                label = self.menu.entrycget(idx, "label") or ""
+                label = m.entrycget(idx, "label") or ""
                 if "⏯" in label or "⏭" in label or "⏮" in label:
-                    self.menu.entryconfigure(idx, state="normal" if ready else "disabled")
+                    m.entryconfigure(idx, state="normal" if ready else "disabled")
                 elif t("现在在放什么…") in label:
-                    self.menu.entryconfigure(
+                    m.entryconfigure(
                         idx, state="normal" if self.music is not None else "disabled")
             except Exception:                            # noqa: BLE001
                 continue
+
+    def _on_menu(self, e):
+        self._refresh_music_menu_state()
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:

@@ -926,17 +926,58 @@ class TestMusicAndActivity(E2EBase):
         self.assertFalse(app._music_ready())
 
     def test_music_menu_items_exist(self):
+        """音乐那几项要在菜单里 —— **递归找**。
+
+        菜单是分组的（音乐/番茄钟/陪伴/外观/会话五个子菜单），
+        只看顶层会找不到。测试**不该关心菜单是平铺还是嵌套的**，
+        所以用 `_menu_entries` 走整棵树。
+        """
         app, _, _ = self._app_with(None)
-        labels = []
-        for i in range(app.menu.index("end") + 1):
-            try:
-                if app.menu.type(i) == "command":
-                    labels.append(app.menu.entrycget(i, "label") or "")
-            except Exception:                        # noqa: BLE001
-                pass
-        joined = " ".join(labels)
+        joined = " ".join(app._all_menu_labels())
         for want in ("⏯", "⏭", "⏮", I.t("现在在放什么…")):
             self.assertIn(want, joined, f"菜单里少了 {want}")
+
+    def test_menu_is_grouped_not_flat(self):
+        """**30 项平铺 → 11 个可见项 + 5 个子菜单。**
+
+        原来右键一下弹出一整屏文字，得读完 30 项才能找到要的那个。
+
+        **数的是可见项，不含分隔线** —— 分隔线是排版不是内容，
+        算进去的话"缩短菜单"就变成了"少画几条线"。
+        """
+        app, _, _ = self._app_with(None)
+        n = app.menu.index("end") + 1
+        visible = [i for i in range(n) if app.menu.type(i) != "separator"]
+        self.assertLessEqual(len(visible), 12,
+                             f"顶层还有 {len(visible)} 个可见项，太长了")
+        cascades = [app.menu.entrycget(i, "label") or ""
+                    for i in range(n)
+                    if app.menu.type(i) == "cascade"]
+        self.assertGreaterEqual(len(cascades), 5, f"子菜单太少：{cascades}")
+
+    def test_music_items_get_greyed_out_by_the_recursive_walk(self):
+        """**`_on_menu` 要能灰掉子菜单里的项。**
+
+        第一版只遍历顶层 `command`，而音乐项搬进子菜单之后就再也
+        灰不掉了 —— 没在放歌时那几项还是亮的，点了没反应。
+        """
+        app, fm, _ = self._app_with(fake_track("歌", "人"))
+        fm.np = None
+        app.music = fm
+        # **调抽出来的那个，不要调 `_on_menu`** —— 后者最后会
+        # `tk_popup`，那是**阻塞等用户输入**的。测试里没人点，
+        # 于是卡到超时（实测 175 秒，把整条 e2e 从 30 秒拖到 170 秒）。
+        app._refresh_music_menu_state()
+        states = {}
+        for m, i, kind in app._menu_entries(app.menu):
+            if kind != "command":
+                continue
+            label = m.entrycget(i, "label") or ""
+            if "⏯" in label or "⏭" in label or "⏮" in label:
+                states[label] = str(m.entrycget(i, "state"))
+        self.assertTrue(states, "没找到音乐项")
+        for label, st in states.items():
+            self.assertEqual(st, "disabled", f"{label} 没被灰掉（{st}）")
 
     def test_track_change_plays_a_reaction(self):
         """切歌时她要有反应 —— 走 _poll，不是直接调 _music_react。"""
@@ -1335,13 +1376,25 @@ class TestMappingWindow(E2EBase):
 
     @staticmethod
     def _buttons(win):
+        """所有按钮的 (文字, 控件)。
+
+        **`cget("text")` 要包在 try 里** —— ttk 的 `TSeparator` 没有
+        `text` 选项，直接取会抛 TclError。
+        """
         out = []
 
         def walk(w):
             for c in w.winfo_children():
                 try:
-                    if c.winfo_class() == "Button":
-                        out.append((str(c.cget("text")), c))
+                    if c.winfo_class() not in ("Button", "TButton"):
+                        walk(c)
+                        continue
+                    text = str(c.cget("text"))
+                    # **过滤掉已经销毁的** —— 重开过窗口之后，
+                    # 树里可能还留着失效引用，`invoke()` 会抛
+                    # `invalid command name`。
+                    if c.winfo_exists():
+                        out.append((text, c))
                 except Exception:                        # noqa: BLE001
                     pass
                 walk(c)
@@ -1351,12 +1404,19 @@ class TestMappingWindow(E2EBase):
 
     @staticmethod
     def _widgets(w, cls):
+        """按控件类找。**ttk 与否都认。**
+
+        `ttk.Button` 的 `winfo_class()` 是 `TButton`，`tk.Button` 是
+        `Button`。测试不该关心用哪套 —— 换了 ttk 之后十几处断言会全挂，
+        而它们本来测的是"有几个按钮"，不是"按钮是哪个实现的"。
+        """
+        want = {cls, "T" + cls}
         out = []
 
         def walk(x):
             for c in x.winfo_children():
                 try:
-                    if c.winfo_class() == cls:
+                    if c.winfo_class() in want:
                         out.append(c)
                 except Exception:                        # noqa: BLE001
                     pass
@@ -1373,7 +1433,7 @@ class TestMappingWindow(E2EBase):
             nonlocal n
             for c in w.winfo_children():
                 try:
-                    if c.winfo_class() == "Menubutton":
+                    if c.winfo_class() in ("Menubutton", "TMenubutton"):
                         vn = str(c.cget("textvariable"))
                         if vn and win.getvar(vn) == want_from:
                             win.setvar(vn, to)
@@ -1757,12 +1817,19 @@ class TestSettingsLayout(E2EBase):
 
     @staticmethod
     def _widgets(w, cls):
+        """按控件类找。**ttk 与否都认。**
+
+        `ttk.Button` 的 `winfo_class()` 是 `TButton`，`tk.Button` 是
+        `Button`。测试不该关心用哪套 —— 换了 ttk 之后十几处断言会全挂，
+        而它们本来测的是"有几个按钮"，不是"按钮是哪个实现的"。
+        """
+        want = {cls, "T" + cls}
         out = []
 
         def walk(x):
             for c in x.winfo_children():
                 try:
-                    if c.winfo_class() == cls:
+                    if c.winfo_class() in want:
                         out.append(c)
                 except Exception:                        # noqa: BLE001
                     pass
@@ -1783,7 +1850,9 @@ class TestSettingsLayout(E2EBase):
 
     def test_four_tabs_with_the_right_names(self):
         _app, _win, nb = self._open()
-        names = [nb.tab(i, "text") for i in range(nb.index("end"))]
+        # **strip** —— Tab 文字两边有填充空格（为了让 Tab 好看），
+        # 但测试断言的是"有哪些 Tab"，不是"两边有没有空格"。
+        names = [nb.tab(i, "text").strip() for i in range(nb.index("end"))]
         self.assertEqual(names, ["行为", "外观", "对话", "关于"], str(names))
 
     def test_window_fits_a_small_screen(self):
@@ -1838,17 +1907,40 @@ class TestSettingsLayout(E2EBase):
     def test_status_and_close_live_outside_the_tabs(self):
         """状态提示和「关闭」在**底部条**上 —— 任何 Tab 下都看得见。
 
-        判据是"**不在 Notebook 的页里**"。第一版写成遍历顶层子控件再断言
-        "每个都不是 Notebook"，而 Notebook 自己就在顶层 —— 必然失败，
-        是测试写错了，不是代码错了。
+        判据是"**不在 Notebook 的页里**"。
+
+        两次写错这条：
+          · 第一版遍历顶层子控件再断言"每个都不是 Notebook"，
+            而 Notebook 自己就在顶层 —— 必然失败。
+          · 第二版只看 `win` 的直接子控件，而「关闭」现在在一个底部
+            `bar` Frame 里 —— 扫不到。
+
+        **断言的是"在不在 Tab 页里"，不是"在第几层父控件下面"。**
         """
         _app, win, nb = self._open()
         inside = set(nb.winfo_children())                # 四个 Tab 页
-        outside = [c for c in win.winfo_children() if c not in inside and c is not nb]
 
-        btns = [str(c.cget("text")) for c in outside if c.winfo_class() == "Button"]
+        def outside_widgets(w):
+            """不在 Notebook 页里的控件（递归）。"""
+            out = []
+            for c in w.winfo_children():
+                if c in inside or c is nb:
+                    continue
+                out.append(c)
+                out.extend(outside_widgets(c))
+            return out
+
+        outer = outside_widgets(win)
+        btns = []
+        for c in outer:
+            try:
+                if c.winfo_class() in ("Button", "TButton"):
+                    btns.append(str(c.cget("text")))
+            except Exception:                            # noqa: BLE001
+                pass
         self.assertTrue(any("关闭" in x for x in btns), f"关闭不在底部：{btns}")
-        labels = [c for c in outside if c.winfo_class() == "Label"]
+        labels = [c for c in outer
+                  if c.winfo_class() in ("Label", "TLabel")]
         self.assertTrue(labels, "底部没有状态标签")
 
     def test_nothing_was_lost(self):
@@ -1864,7 +1956,11 @@ class TestSettingsLayout(E2EBase):
         # 相处记录还在
         texts = [str(x.cget("text")) for x in self._widgets(about, "Label")]
         self.assertTrue(any("相处记录" in x for x in texts), str(texts[:6]))
-        self.assertTrue(any("热键" in x for x in texts), str(texts[:8]))
+        # 热键表**在行为页** —— 有意从「关于」挪过来的：行为页原来只有
+        # 四个复选框 + 一个下拉框，底下空一大片，热键放这儿正好填上。
+        beh_texts = [str(x.cget("text")) for x in self._widgets(beh, "Label")]
+        self.assertTrue(any("热键" in x for x in beh_texts), str(beh_texts[:8]))
+        self.assertTrue(any("Ctrl+Alt+P" in x for x in beh_texts), str(beh_texts[:12]))
 
 
 if __name__ == "__main__":

@@ -304,9 +304,11 @@ class TestAppSmoke(unittest.TestCase):
         app.root.update()
         win = app._settings_win
         widgets = self._walk(win)
-        checks = [w for w in widgets if w.winfo_class() == "Checkbutton"]
+        checks = [w for w in widgets
+              if w.winfo_class() in ("Checkbutton", "TCheckbutton")]
         self.assertGreaterEqual(len(checks), 4, f"复选框只有 {len(checks)} 个")
-        buttons = [w for w in widgets if w.winfo_class() == "Button"]
+        buttons = [w for w in widgets
+               if w.winfo_class() in ("Button", "TButton")]
         # 位置复位 / 重置相处记录 / 出错日志 / 关闭
         self.assertGreaterEqual(len(buttons), 4, f"按钮只有 {len(buttons)} 个")
         win.destroy()
