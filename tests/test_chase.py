@@ -48,6 +48,18 @@ class ChaseBase(unittest.TestCase):
         self._orig_idle = S.idle_seconds
         S.idle_seconds = lambda: 1.0
         self.addCleanup(lambda: setattr(S, "idle_seconds", self._orig_idle))
+        # **还要钉死"现在是夜里吗"。**
+        #
+        # `_try_chase()` 第一句就是 `if night: return False`。而 `_night()`
+        # 看的是**本机时钟** —— CI runner 是 UTC，本地时间落在夜里就
+        # 一次都不追，于是 `'idle' != 'chasing'`。
+        #
+        # 实测：本地全绿，CI 两个 Python 版本一起挂（规则 6：测试不许
+        # 依赖机器状态 —— 这次是**时钟**）。
+        self._orig_night = S.CompanionSource._night
+        S.CompanionSource._night = lambda self: False
+        self.addCleanup(lambda: setattr(S.CompanionSource, "_night",
+                                        self._orig_night))
         self.c = S.CompanionSource(os.path.join(_TMP, f"mood-{id(self)}.json"))
         self.c.state = "idle"
         self.c.state_until = 0.0
