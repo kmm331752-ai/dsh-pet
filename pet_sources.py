@@ -841,6 +841,7 @@ class CompanionSource:
         self.pet_x = 0                  # 桌宠窗口左边 x
         self.gaze_dir = 1               # 1 向右看，-1 向左看
         self.wander_target = 0.0        # 溜达的窗口目标 x（0 = 不动）
+        self.chase_since = 0.0          # 什么时候开始追的（超时用）
         # 健康提醒：连续活动多久了（人一直没离开就是久坐）
         self.sitting_since = time.time()
         self.next_health = time.time() + HEALTH_FIRST
@@ -1159,8 +1160,37 @@ class CompanionSource:
             elif self.state == "yawning":
                 self._enter("dozing", 0.0)
             elif self.state in ("roaming", "gazing", "peeking", "petted"):
-                self._enter("idle")
-                self.wander_target = 0.0                     # 停下就别再挪窗口
+                # **看完了，还在远处 → 走过去。**
+                # 顺序是「看 → 过来 → 再看一眼」，和 oneko 先出一帧
+                # `alert` 再起步一样：先给个反应，再动身。
+                if self.state == "gazing" and self._try_chase(now, night):
+                    pass
+                else:
+                    self._enter("idle")
+                    self.wander_target = 0.0                 # 停下就别再挪窗口
+            elif self.state == "chasing":
+                # **每轮重新读光标** —— 不是"朝一个死目标走"。
+                # 你边移动她边跟，和 oneko 一样。
+                dx = self.mouse_x - (self.pet_x + WIN_W / 2)
+                stale = now - self.mouse_at > CHASE_GIVE_UP_S
+                if abs(dx) <= CHASE_DEAD_ZONE:
+                    # 到了。**用 16 方向素材正对着你看** —— 这是那两行
+                    # 唯一该出现的地方（当走路循环会变成滑行）。
+                    self._enter("gazing", GAZE_HOLD)
+                    self.wander_target = 0.0
+                    self.gaze_dir = 1 if dx > 0 else -1
+                    if random.random() < 0.35:
+                        self.say(say_line("CHASE_ARRIVE_LINES"), 3.0)
+                elif stale or now - self.chase_since > CHASE_MAX_S:
+                    # 你不动了，或者追太久了 —— 回去自己过日子
+                    self._enter("idle")
+                    self.wander_target = 0.0
+                    self.next_roam = now + random.uniform(20, 50)
+                else:
+                    self.gaze_dir = 1 if dx > 0 else -1
+                    self.wander_target = self._clamp_target(
+                        self.mouse_x - WIN_W / 2)
+
             elif self.state == "idle":
                 sleep_after = NIGHT_IDLE_SLEEP if (night or tired) else IDLE_SLEEP
                 # **有人在放歌 = 有人在。** 写在状态机自己的条件里，不是靠
@@ -1204,11 +1234,46 @@ class CompanionSource:
         # 看向哪边 / 溜达到哪 —— 交给 PetApp 去动窗口
         snap.mirror = self.gaze_dir < 0
         snap.wander = self.wander_target
+        # 追鼠标要比溜达快。0 = 让 PetApp 用默认的 WANDER_STEP。
+        snap.wander_step = CHASE_STEP if self.state == "chasing" else 0
         # 气泡：她说的话占用副行文案，但用强调色画出来，并进 _card_cache 的键
         # 音乐 / 安静状态贴上去。和 PetApp 用的是同一个函数 ——
         # 两条分支（陪伴模式 / DSH 模式）共用一套逻辑。
         self.decorate(snap, now)
         return snap
+
+    # -- 追鼠标 -------------------------------------------------------------
+    def _try_chase(self, now: float, night: bool) -> bool:
+        """离光标太远就走过去。返回是否接管了本帧。
+
+        **三个刹车**，不然她会像 oneko 一样一路跟着你烦：
+
+          1. 光标得是**动的**（`CHASE_ARM_S` 内动过）
+          2. **够近就不追**（`CHASE_DEAD_ZONE`）
+          3. **追太久就放弃**（在 chasing 分支里判 `CHASE_MAX_S`）
+        """
+        if night:
+            return False
+        if now - self.mouse_at > CHASE_ARM_S:
+            return False
+        if self.mood.energy <= CHASE_MIN_ENERGY:
+            return False
+        dx = self.mouse_x - (self.pet_x + WIN_W / 2)
+        if abs(dx) <= CHASE_DEAD_ZONE:
+            return False
+        self._enter("chasing")
+        self.chase_since = now
+        self.wander_target = self._clamp_target(self.mouse_x - WIN_W / 2)
+        self.gaze_dir = 1 if dx > 0 else -1
+        return True
+
+    @staticmethod
+    def _clamp_target(x: float) -> float:
+        """把目标窗口位置夹到屏幕里 —— 不能追到屏幕外面去。"""
+        vx, _vy, vw, _vh = virtual_screen()
+        if vw <= 0:
+            return float(x)
+        return float(max(vx, min(vx + vw - WIN_W, x)))
 
     # -- 溜达目标 -----------------------------------------------------------
     def _pick_wander_target(self) -> float:
@@ -1227,7 +1292,13 @@ class CompanionSource:
 
     # -- 看向鼠标 -----------------------------------------------------------
     def _try_gaze(self, now: float, night: bool) -> bool:
-        """鼠标在附近动过就转头看他。返回是否接管了本帧。"""
+        """鼠标在附近动过就转头看他。返回是否接管了本帧。
+
+        **注意这里量的是窗口左边缘（`mouse_x - pet_x`），而 `_try_chase`
+        量的是窗口中心。** 追鼠标必须按中心算（不然她停在光标左边
+        WIN_W/2 处）；转头按左边缘算是历史写法，而且在测过很多遍的
+        路径上，这次不动。两者阈值有重叠带，结果是「近处只看、远处才来」。
+        """
         if night or now - self.mouse_at > GAZE_FRESH:
             return False
         dx = self.mouse_x - self.pet_x
@@ -1279,6 +1350,9 @@ WAKE_LINES = ["唔…醒了醒了", "你回来啦", "别晃我…", "再睡五�
 SLEEP_LINES = ["我先眯一会儿", "撑不住了…", "晚安", "困死了"]
 YAWN_LINES = ["啊——欠", "好无聊啊", "你在忙什么", "有点困了"]
 ROAM_LINES = ["溜达一圈", "活动活动", "看看窗外", "嗯…走两步"]
+
+# 追到你跟前时说的话。**只偶尔说**（35%）—— 每次都说话就变成报站了。
+CHASE_ARRIVE_LINES = ["来啦", "找我？", "在这儿呢", "跑这么快干嘛", "追上你了"]
 PET_LINES = ["嘿嘿", "好舒服", "再摸摸", "最喜欢你了"]
 ANNOY_LINES = ["别摸了…", "够了够了", "手拿开", "烦不烦"]
 DIZZY_LINES = ["晕…", "别甩了！", "天旋地转", "放我下来"]

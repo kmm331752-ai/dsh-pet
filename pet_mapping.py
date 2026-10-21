@@ -93,6 +93,9 @@ DEFAULT_STATE_ANIMATION = {
     # "默认必须和原来一模一样"那条测试抓到。）
     "roaming": "running-right",
     "gazing": "running-right",
+    # 追鼠标用真正的"跑"那一行（行 7）—— 比 running-right 快，
+    # 看起来是"赶过来"而不是"散步过来"。
+    "chasing": "running",
 }
 
 # ── 陪伴模式的放慢倍数 ──────────────────────────────────────────────────────
@@ -126,6 +129,7 @@ STATE_META = [
     {"id": "offline",     "label": "没会话",   "default": "idle"},
     {"id": "roaming",     "label": "溜达",     "default": "running-right"},
     {"id": "gazing",      "label": "看你",     "default": "running-right"},
+    {"id": "chasing",     "label": "过来啦",   "default": "running"},
     {"id": "peeking",     "label": "张望",     "default": "idle"},
     {"id": "yawning",     "label": "打哈欠",   "default": "idle"},
     {"id": "dozing",      "label": "犯困",     "default": "idle"},

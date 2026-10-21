@@ -97,6 +97,9 @@ class Snapshot:
     bubble: bool = False                              # detail_line 是她说的话，用强调色画
     mirror: bool = False                              # 水平翻转（看向左边时用）
     wander: float = 0.0                               # 窗口水平目标位置（绝对坐标，0 = 不动）
+    # 每帧挪多少像素。0 = 用默认的 WANDER_STEP。
+    # 追鼠标要比溜达快，不然看起来像在散步。
+    wander_step: int = 0
     slow_tools: list = field(default_factory=list)    # 主任务最慢的工具 [(名字, 毫秒)]
     focus_x: float = 0.0                              # 非 0 时把窗口移到这个 x（等待提醒用）
     quiet: bool = False                               # 你在开会/专注时她闭嘴（音乐源和活动源决定）

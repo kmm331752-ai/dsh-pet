@@ -270,6 +270,7 @@ PALETTE = {
     # ── 陪伴模式的状态（没有 DSH 任务时她自己过日子）──
     "roaming":     dict(accent="#3F9E9E", label="溜达",   dot="#6FC7C7"),
     "gazing":      dict(accent="#4E8FB8", label="看你",   dot="#7FBEDC"),
+    "chasing":     dict(accent="#D2793C", label="过来啦", dot="#F0A666"),
     "peeking":     dict(accent="#6E8FB0", label="探头",   dot="#9BB8D4"),
     "yawning":     dict(accent="#8A7BA8", label="犯困",   dot="#B3A6CC"),
     "dozing":      dict(accent="#5E6E92", label="打盹",   dot="#8B9BC0"),
@@ -334,6 +335,17 @@ GAZE_FRESH = 2.5                 # 鼠标动过多久之内她会看过去（秒
 GAZE_MIN_DX = 90                 # 鼠标离她多远才值得转头（像素）
 GAZE_HOLD = 1.6                  # 看多久
 WANDER_STEP = 3                  # 溜达时每帧移动多少像素（越小越自然）
+
+# ── 追鼠标（抄 oneko 的核心行为）──
+# 她现在**只会看，不会来**：光标跑到屏幕另一头，她只是把头转过去。
+CHASE_DEAD_ZONE = 110        # 离光标这么近就不追了（比 GAZE_MIN_DX 大，
+                             # 留一条"近处只看、远处才来"的重叠带）
+CHASE_ARM_S = 2.5            # 光标这么久之内动过，她才愿意追
+CHASE_STEP = 7               # 追的时候每帧挪多少（比 WANDER_STEP 快，
+                             # 不然看起来像在散步）
+CHASE_MAX_S = 8.0            # 追这么久还没到就放弃 —— 不跟着跑到天涯海角
+CHASE_GIVE_UP_S = 1.6        # 光标停了这么久，她就不追了
+CHASE_MIN_ENERGY = 0.30      # 太累了不追
 
 # 角色素材来自 1190fasheqi/dafeiyu-pet（MIT），见 assets/ATTRIBUTION.md
 

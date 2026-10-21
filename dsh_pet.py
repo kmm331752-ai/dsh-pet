@@ -3209,13 +3209,16 @@ class PetApp:
                             self.companion.bubble_until = 0.0
                 if self.snap.state == "waiting" and not self.focus_mode:
                     self._attention()                        # 卡在你这儿就走到屏幕中间
-                # 溜达：把窗口朝目标位置挪一点。拖动中不抢方向盘。
+                # 溜达 / 追鼠标：把窗口朝目标位置挪一点。拖动中不抢方向盘。
                 if (self.in_companion and self.snap.wander and self._drag is None
                         and getattr(self, "_drop_job", None) is None):
                     target = int(self.snap.wander)
+                    # 追鼠标时步子迈大一点（`snap.wander_step`），
+                    # 不然"赶过来"看起来像"散步过来"。
+                    step = int(getattr(self.snap, "wander_step", 0) or WANDER_STEP)
                     wx = self.root.winfo_x()
-                    if abs(wx - target) > WANDER_STEP:
-                        wx += WANDER_STEP if target > wx else -WANDER_STEP
+                    if abs(wx - target) > step:
+                        wx += step if target > wx else -step
                         self.root.geometry(f"+{wx}+{self.root.winfo_y()}")
         except Exception as exc:                         # noqa: BLE001
             log_error("poll 轮询异常", exc)

@@ -78,6 +78,12 @@ jobs:
         # 测试从**菜单**进、点**真按钮**，不是直接调 _do_feed()。
         run: python tests/test_feed.py
 
+      - name: 追鼠标（看 → 过来 → 再看一眼）
+        # 抄 oneko 的核心行为，但加了三个刹车：光标得动、够近就不追、
+        # 追太久放弃。测的正是这三个刹车 —— 不然她会像 oneko 一样
+        # 一路跟着你烦。
+        run: python tests/test_chase.py
+
       - name: 长跑测试（0.15 模拟小时）
         # 拦「每帧都在漏」那种 —— 15,600 帧，每帧漏 1KB 就是 15MB，
         # 判定阈值是 80MB / 60%，抓得住。
@@ -94,4 +100,4 @@ jobs:
           python -m py_compile pet_sources.py pet_system.py pet_skin_install.py
           python -m py_compile pet_accessories.py pet_chat.py pet_i18n.py pet_platform.py pet_food.py pet_music.py pet_activity.py pet_lint.py
           python -m py_compile dsh_pet.py build_exe.py tools/soak.py
-          python -m py_compile tests/test_pet.py tests/test_smoke.py tests/test_e2e.py tests/test_lint.py tests/test_lint_e2e.py tests/test_git.py tests/test_feed.py
+          python -m py_compile tests/test_pet.py tests/test_smoke.py tests/test_e2e.py tests/test_lint.py tests/test_lint_e2e.py tests/test_git.py tests/test_feed.py tests/test_chase.py

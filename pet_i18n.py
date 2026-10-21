@@ -97,6 +97,19 @@ def t_lines(zh_lines: list) -> list:
 # 按界面区域分组，方便对照着找漏。
 
 EN = {
+    "过来啦":
+        "Coming over",
+    "来啦":
+        "Here!",
+    "找我？":
+        "You called?",
+    "在这儿呢":
+        "Over here",
+    "跑这么快干嘛":
+        "Why so fast?",
+    "追上你了":
+        "Got you",
+
     "她都看到了什么…":
         "What she noticed…",
     "她都看到了什么":

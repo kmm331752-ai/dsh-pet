@@ -994,35 +994,61 @@ class TestMusicAndActivity(E2EBase):
         self.assertGreater(app.poke_until, time.time(), "切歌没反应")
 
     def test_health_reminder_survives_quiet(self):
-        """**CI 抓到的回归测试。**
+        """**CI 抓到的回归测试。** quiet 是「别闲聊」，不是「闭嘴」。
 
-        quiet（开会/写代码时别打扰）第一版压掉了**所有**气泡，
-        包括久坐提醒 —— CI 上直接挂了已有的
-        `test_fires_while_dsh_is_busy`。
+        语义：开会/写代码时不该说"这首好听"，但**该提醒你起来动动**。
 
-        语义应该是「别闲聊」，不是「闭嘴」：开会时不该说"这首好听"，
-        但**该提醒你起来动动**。
+        ## 这条飘过好几次，最后那句断言本来就是错的
+
+        `decorate()` 里是：
+
+            if now < self._quiet_until and not self.bubble_important:
+                snap.quiet = True
+
+        **important 气泡在的时候 quiet 本来就不该为真。** 原来最后那句
+        `assertTrue(app.snap.quiet)` 之所以通常能过，只是因为
+        `_health_tick()` 跑在 `decorate()` **之后** —— 纯属时序巧合，
+        换个顺序或者前面留了条重要气泡就挂。
+
+        （也试过把 `_quiet_until` 显式钉住，不行：`_activity_tick()`
+        在 `_poll()` 里跑在 `decorate()` **之前**，会把它清成 0。
+        所以还是走活动源，让 coding 那个分类自己把 quiet 设上。）
         """
         app, _, _ = self._app_with(
             None, AC.Activity(process="Code.exe", category="coding"))
         app._poll()
-        self.assertTrue(app.snap.quiet, "先确认真的进了 quiet")
+        self.assertTrue(app.snap.quiet, "动手前先确认真的进了 quiet")
 
         # 造一个"久坐到点"
         app.companion.sitting_since = time.time() - 99999
         app.companion.next_health = 0.0
         app.companion.bubble_until = 0.0
         # idle_seconds 要 patch **两个模块** —— dsh_pet 里是
-        # `from pet_sources import *`，那是另一份引用（AGENTS.md 规则 6，
-        # 这个坑 2024 年就踩过一次，_patch_health 的 docstring 里写着）。
+        # `from pet_sources import *`，那是另一份引用（AGENTS.md 规则 6）。
         with mock.patch.object(S, "idle_seconds", lambda: 1.0), \
              mock.patch.object(P, "idle_seconds", lambda: 1.0):
             app._poll()
             app.root.update()
         self.assertTrue(app.companion.bubble, "久坐提醒被 quiet 压没了")
         self.assertTrue(app.companion.bubble_important, "久坐提醒该标 important")
-        self.assertTrue(app.snap.bubble, "气泡没贴到 snapshot 上")
-        self.assertTrue(app.snap.quiet, "quiet 标记本身还在")
+        self.assertTrue(app.snap.bubble, "重要气泡没贴到 snapshot 上")
+        # **不再断言 snap.quiet** —— 见 docstring，那条本来就是错的。
+
+    def test_chitchat_is_suppressed_by_quiet(self):
+        """**另一半语义**：不重要的话，quiet 期间确实压掉。
+
+        和上一条配成一对 —— 只有一条的话，"quiet 太狠"和"quiet 没用"
+        看起来是一样的。
+        """
+        app, _, _ = self._app_with(
+            None, AC.Activity(process="Code.exe", category="coding"))
+        app.companion.bubble_until = 0.0
+        app.companion.bubble_important = False
+        # 一句闲聊：不重要。放在 poll **之前**，让 decorate 有机会压它。
+        app.companion.say("这首好听", 10.0, important=False)
+        app._poll()
+        self.assertTrue(app.snap.quiet, "quiet 期间应该是安静的")
+        self.assertFalse(app.snap.bubble, "闲聊不该穿过 quiet")
 
     def test_music_wakes_her_up(self):
         """放歌说明有人在 —— 她不该睡着。
@@ -1558,8 +1584,8 @@ class TestMappingWindow(E2EBase):
         win = self._open_via_settings(app)
         tabs = self._tabs(win)
         self.assertEqual(len(tabs), 2, f"Tab 数不对：{len(tabs)}")
-        self.assertEqual(len(self._widgets(tabs[0], "Menubutton")), 15,
-                         "状态那页该有 15 个下拉框")
+        self.assertEqual(len(self._widgets(tabs[0], "Menubutton")), 16,
+                         "状态那页该有 16 个下拉框（加了 chasing）")
         self.assertEqual(len(self._widgets(tabs[1], "Spinbox")), 9,
                          "动画那页该有 9 个行号框")
         self.assertEqual(len(self._widgets(tabs[1], "Entry")), 9,
