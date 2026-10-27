@@ -3628,6 +3628,16 @@ def main() -> int:
     # 必须在建任何窗口之前声明 DPI 感知，否则 Windows 会先按老的缩放方式
     # 把窗口位图拉伸，4K 屏上整只桌宠和字都是糊的。
     set_dpi_awareness()
+    # **修存量。** 拆模块那次把自启命令里的 `__file__` 从 dsh_pet.py
+    # 变成了 pet_system.py —— 那之后勾过自启的人，注册表里一直是错的
+    # （开机跑一个没有 main() 的模块，瞬间退出、什么都不发生）。
+    # 光修写入端不够：已经写进去的错值不会自己好。
+    try:
+        if repair_autostart() == "fixed":
+            print("  [autostart] 自启命令指错了，已改回 dsh_pet.py",
+                  file=sys.stderr)
+    except Exception:                                    # noqa: BLE001
+        pass
 
     if args.list_skins:
         for s in discover_skins():

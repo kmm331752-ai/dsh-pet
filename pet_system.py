@@ -96,7 +96,7 @@ class HotKeys(threading.Thread):
 # 网络不通、限流、被墙都只算「查不到」，绝不能让桌宠因此启动不了或弹错误。
 
 REPO = "kmm331752-ai/dsh-pet"
-APP_VERSION = "1.21.0"
+APP_VERSION = "1.21.1"
 UPDATE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 
@@ -135,13 +135,32 @@ AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "DSH-Pet"
 
 
+def entry_script() -> str:
+    """**真正的入口脚本** —— `dsh_pet.py`，不是本文件。
+
+    踩过：`4d3f645` 那次「把 3300 行的单文件拆成 6 个模块」，把开机自启
+    这段搬到了 `pet_system.py`，而里面写的是：
+
+        return f'"{exe}" "{os.path.abspath(__file__)}"'
+
+    `__file__` 于是从 `dsh_pet.py` 变成了 `pet_system.py` —— 而
+    `pet_system.py` 只有常量和 winreg 封装，**没有 `main()`**。
+    开机跑起来是个瞬间退出、什么都不发生的进程。
+
+    用户在设置里勾着「开机自启」，重启之后桌宠不出现，而且**没有任何
+    报错**。和规则 2 说的「功能安静地不工作」是同一个形状。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, "dsh_pet.py")
+
+
 def autostart_command() -> str:
     """开机自启要跑的命令行。打包成 exe 之后就是 exe 自己。"""
     if getattr(sys, "frozen", False):                    # PyInstaller 打的包
         return f'"{sys.executable}"'
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     exe = pyw if os.path.exists(pyw) else sys.executable
-    return f'"{exe}" "{os.path.abspath(__file__)}"'
+    return f'"{exe}" "{entry_script()}"'
 
 
 def autostart_enabled() -> bool:
@@ -160,16 +179,50 @@ def autostart_enabled() -> bool:
         return False
 
 
+def repair_autostart() -> str:
+    """把注册表里指错的自启命令改回来。返回发生了什么。
+
+    **光修写入端不够。** 已经写进去的错值不会自己好 —— `4d3f645` 之后
+    勾过自启的用户，注册表里到现在都还是 `pet_system.py`。
+
+    所以每次启动查一遍：开着自启、但命令不是我们要的 → 重写。
+
+    返回：
+      · ``"ok"``      没开自启，或者本来就是对的
+      · ``"fixed"``   发现指错了，已经改回来
+      · ``"off"``     不是 Windows / 没有注册表权限
+    """
+    if not pet_platform.IS_WINDOWS:
+        return "off"
+    try:
+        import winreg
+        want = autostart_command()
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            try:
+                cur, _kind = winreg.QueryValueEx(key, AUTOSTART_NAME)
+            except FileNotFoundError:
+                return "ok"                              # 没开自启，不用管
+        if str(cur) == want:
+            return "ok"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, want)
+        log_error(f"自启命令指错了，已改回：{cur!r} -> {want!r}",
+                  RuntimeError("autostart repaired"))
+        return "fixed"
+    except Exception:                                    # noqa: BLE001
+        return "off"
+
+
 def set_autostart(on: bool) -> bool:
     """开/关自启。非 Windows 直接返回 False。"""
     if not pet_platform.IS_WINDOWS:
         return False
-    """开/关开机自启。返回是否成功。"""
     try:
         import winreg
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
             if on:
-                winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, autostart_command())
+                winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ,
+                                  autostart_command())
             else:
                 try:
                     winreg.DeleteValue(key, AUTOSTART_NAME)
