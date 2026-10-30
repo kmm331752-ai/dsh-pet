@@ -96,7 +96,7 @@ class HotKeys(threading.Thread):
 # 网络不通、限流、被墙都只算「查不到」，绝不能让桌宠因此启动不了或弹错误。
 
 REPO = "kmm331752-ai/dsh-pet"
-APP_VERSION = "1.21.1"
+APP_VERSION = "1.21.2"
 UPDATE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 
@@ -202,7 +202,10 @@ def repair_autostart() -> str:
                 cur, _kind = winreg.QueryValueEx(key, AUTOSTART_NAME)
             except FileNotFoundError:
                 return "ok"                              # 没开自启，不用管
-        if str(cur) == want:
+        # **按 normcase 比。** Windows 路径不区分大小写，字符串 == 区分 ——
+        # 于是 `DeepSeekWork` 和 `DeepSeekwork` 会被当成"指错了"，
+        # 每次启动都重写一遍、还往日志里记一条。
+        if os.path.normcase(str(cur)) == os.path.normcase(want):
             return "ok"
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
             winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, want)

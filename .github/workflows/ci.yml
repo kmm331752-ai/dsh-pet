@@ -92,6 +92,14 @@ jobs:
         # 关键那条不检查字符串，而是**去读那个文件**确认有 __main__。
         run: python tests/test_autostart.py
 
+      - name: 启动路径（单实例锁 / 会话窗口 / 依赖自检）
+        # 开机那一瞬间最容易出问题，而且失败时**用户看不见任何东西**
+        # （pythonw 的 stderr 是黑洞）。三条回归测试：
+        #   · 端口被占要**等**，不能 bind 一次就死
+        #   · 没有活跃任务时「右键 → 会话」不许抛 NameError
+        #   · 缺依赖要写日志并告诉用户 pip install 什么
+        run: python tests/test_startup.py
+
       - name: 长跑测试（0.15 模拟小时）
         # 拦「每帧都在漏」那种 —— 15,600 帧，每帧漏 1KB 就是 15MB，
         # 判定阈值是 80MB / 60%，抓得住。
@@ -108,4 +116,4 @@ jobs:
           python -m py_compile pet_sources.py pet_system.py pet_skin_install.py
           python -m py_compile pet_accessories.py pet_chat.py pet_i18n.py pet_platform.py pet_food.py pet_music.py pet_activity.py pet_lint.py
           python -m py_compile dsh_pet.py build_exe.py tools/soak.py
-          python -m py_compile tests/test_pet.py tests/test_smoke.py tests/test_e2e.py tests/test_lint.py tests/test_lint_e2e.py tests/test_git.py tests/test_feed.py tests/test_chase.py tests/test_autostart.py
+          python -m py_compile tests/test_pet.py tests/test_smoke.py tests/test_e2e.py tests/test_lint.py tests/test_lint_e2e.py tests/test_git.py tests/test_feed.py tests/test_chase.py tests/test_autostart.py tests/test_startup.py

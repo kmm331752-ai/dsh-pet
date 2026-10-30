@@ -1853,7 +1853,11 @@ class PetApp:
         但不是一键直达。
         """
         tk = self.tk
-        tasks = list(self.snap.tasks) or ([P.TaskInfo(
+        # **`P.` 是单文件时代的残留** —— 那时候 P 就是本模块自己。
+        # 拆成六个模块之后没有 P 了，而 TaskInfo 在文件头已经直接导入。
+        # 留着它 = 「右键 → 会话」在没有活跃任务时抛 NameError，
+        # 被 Tk 的回调异常处理器接住 —— 窗口不弹，用户觉得"点了没反应"。
+        tasks = list(self.snap.tasks) or ([TaskInfo(
             session_id=self.snap.session_id, state=self.snap.state,
             title=self.snap.title, tool_names=list(self.snap.tool_names or []))]
             if self.snap.session_id or self.snap.title else [])
@@ -3608,6 +3612,68 @@ def do_shot(prefix: str, skin_id: str = "dafeiyu", privacy: bool = False) -> Non
     print(f"  multi        -> {prefix}-multi.png  ({len(multi.tasks)} 个任务)")
 
 
+# 关键依赖。缺了会**静默降级**，日志里什么都看不出来 —— 所以启动时查一遍。
+#
+# 踩过：DSH 重装运行时之后这台机器丢了 zstandard 和 pywin32。表现是
+# 「读不了会话日志 → 任务状态和踩过的坑全没了」，而 pet_error.log 一个字
+# 都没有。用户只说得出「桌宠又不能用了」。
+_REQUIRED = (
+    ("PIL", "Pillow", "画图，没有它什么都画不出来（必需）"),
+    ("zstandard", "zstandard", "读 DSH 会话日志（任务状态 / 踩过的坑）"),
+    ("pystray", "pystray", "托盘图标（音乐控制的一个入口）"),
+)
+
+
+def check_dependencies() -> list:
+    """查关键依赖。缺的写进日志并返回清单。"""
+    import importlib.util
+    missing = []
+    for mod, pkg, why in _REQUIRED:
+        try:
+            ok = importlib.util.find_spec(mod) is not None
+        except (ImportError, ValueError):
+            ok = False
+        if not ok:
+            missing.append((pkg, why))
+    if missing:
+        detail = "；".join(f"{pkg}（{why}）" for pkg, why in missing)
+        log_error(
+            f"缺少依赖：{detail}。装上就能恢复：pip install "
+            + " ".join(pkg for pkg, _ in missing),
+            RuntimeError("missing dependencies"))
+    return missing
+
+
+def acquire_single_instance(port: int = SINGLE_INSTANCE_PORT,
+                            timeout_s: float = 3.0):
+    """拿到单实例锁。返回 `(socket, None)` 或 `(None, 最后一次异常)`。
+
+    **为什么单独一个函数**：这段逻辑在 `main()` 里的时候测不到，而它恰好
+    是"开机自启失败"最可能的那条路 —— 上一只还没退干净，端口还占着约 2 秒。
+
+    **为什么要重试**：开机自启最容易撞上这个。第一版是 `bind` 一次，
+    失败就 `return 2` —— 而且只 print 到 stderr，**pythonw.exe 下那是黑洞**。
+    用户看到的是「桌宠没起来」，日志里一个字都没有。
+    """
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    last_exc = None
+    deadline = time.time() + timeout_s
+    while True:
+        try:
+            lock.bind(("127.0.0.1", port))
+            lock.listen(1)
+            return lock, None
+        except OSError as exc:
+            last_exc = exc
+            if time.time() >= deadline:
+                try:
+                    lock.close()
+                except Exception:                        # noqa: BLE001
+                    pass
+                return None, last_exc
+            time.sleep(0.2)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="DSH 桌面宠物")
     ap.add_argument("--demo", action="store_true", help="每 3 秒轮换状态预览")
@@ -3632,6 +3698,11 @@ def main() -> int:
     # 变成了 pet_system.py —— 那之后勾过自启的人，注册表里一直是错的
     # （开机跑一个没有 main() 的模块，瞬间退出、什么都不发生）。
     # 光修写入端不够：已经写进去的错值不会自己好。
+    # 缺依赖会让功能**静默消失**，所以查一遍并写进日志
+    try:
+        check_dependencies()
+    except Exception:                                    # noqa: BLE001
+        pass
     try:
         if repair_autostart() == "fixed":
             print("  [autostart] 自启命令指错了，已改回 dsh_pet.py",
@@ -3659,13 +3730,14 @@ def main() -> int:
     # 注意：进程收到终止信号后，端口大约还要 2 秒才真正释放。这期间起来的
     # 新实例会 bind 失败 —— 所以这里必须【报错并非零退出】，不能静默 return 0，
     # 否则调用方（DSH 插件）分不清「已经在跑」和「起来又死了」。
-    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        lock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
-        lock.listen(1)
-    except OSError as exc:
-        print(f"桌宠启动失败：单实例锁端口 {SINGLE_INSTANCE_PORT} 被占用"
-              f"（上一只可能还在退出中，等两秒再试）。{exc}", file=sys.stderr)
+    # 重试 3 秒 + 失败落盘。细节见 acquire_single_instance 的注释。
+    lock, last_exc = acquire_single_instance()
+    if lock is None:
+        # **落盘，不要只打 stderr** —— pythonw.exe 下那是黑洞
+        log_error(f"桌宠启动失败：单实例锁端口 {SINGLE_INSTANCE_PORT} 被占用"
+                  f"（等了 3 秒）。可能上一只还没退干净。", last_exc)
+        print(f"桌宠启动失败：单实例锁端口 {SINGLE_INSTANCE_PORT} 被占用",
+              file=sys.stderr)
         return 2
 
     PetApp(args).run()
