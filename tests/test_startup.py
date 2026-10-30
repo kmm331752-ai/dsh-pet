@@ -240,10 +240,21 @@ class TestDependencyCheck(unittest.TestCase):
         self.assertIn("no-such-pkg", text)
         self.assertIn("pip install", text, "没告诉用户怎么修")
 
-    def test_nothing_missing_is_quiet(self):
+    def test_only_missing_ones_are_reported(self):
+        """**不要断言"列表为空"** —— 那是拿机器状态当断言（规则 6）。
+
+        第一版写的就是 `assertEqual(check_dependencies(), [])`，
+        在本地全绿、CI 全挂：CI 只装 `pillow zstandard`，没装 `pystray`。
+
+        正确的契约是：**缺的报，有的不报。**
+        """
         import dsh_pet as P
-        self.assertEqual(P.check_dependencies(), [],
-                         "依赖都齐的时候不该报")
+        orig = P._REQUIRED
+        P._REQUIRED = (("PIL", "Pillow", "画图"),
+                       ("surely_not_installed_xyz", "no-such-pkg", "测试"))
+        self.addCleanup(lambda: setattr(P, "_REQUIRED", orig))
+        missing = [m[0] for m in P.check_dependencies()]
+        self.assertEqual(missing, ["no-such-pkg"], "把装好的也报成缺了")
 
     def test_pillow_is_required(self):
         """Pillow 是真必需 —— 没有它连一帧都画不出来。"""

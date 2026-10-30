@@ -31,7 +31,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # 只装跑测试需要的；pystray / numpy 是可选功能，测试里不碰
-          pip install pillow zstandard
+          # pystray 也要装：`check_dependencies()` 会在缺它时报警，
+          # 而 test_nothing_missing_is_quiet 断言的正是"不缺"。
+          # numpy 仍是可选的，测试不碰。
+          pip install pillow zstandard pystray
 
       - name: 单元测试（状态机 / 渲染 / 解析 / 出错日志）
         run: python tests/test_pet.py
