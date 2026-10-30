@@ -367,6 +367,21 @@ def skins_dir() -> str:
     discover_skins 还在看真目录，第二次是改成函数后仍然改不动 ——
     因为函数里读的还是常量。
     """
+    # **持久目录，不是随包目录。**
+    #
+    # `--onefile` 打包后 `app_dir()` 是 `sys._MEIPASS` —— 每次启动解压、
+    # 退出就删的临时目录。装那儿的皮肤**重启就没了**。
+    #
+    # 源码运行看不出这个问题（`data_dir()` 就是仓库目录），所以一直没暴露。
+    return os.path.join(data_dir(), "skins")
+
+
+def bundled_skins_dir() -> str:
+    """随包发的只读皮肤目录（exe 里是 `_MEIPASS/assets/skins`）。
+
+    **只读** —— 装新皮肤要去 `skins_dir()`。这个目录是给"随包带的那些"
+    用的，`discover_skins()` 两个都扫。
+    """
     return os.path.join(assets_dir(), "skins")
 
 

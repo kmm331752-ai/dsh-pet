@@ -649,6 +649,7 @@ CLAWD_STATE_MAP = {
 # clawd 的用户主题目录（%APPDATA%/clawd-on-desk/themes）
 CLAWD_THEME_DIRS = [
     os.path.join(os.environ.get("APPDATA", ""), "clawd-on-desk", "themes"),
+    os.path.join(bundled_skins_dir(), "clawd"),
     os.path.join(skins_dir(), "clawd"),
 ]
 RASTER_EXTS = (".apng", ".gif", ".webp", ".png", ".jpg", ".jpeg")
@@ -869,7 +870,10 @@ def discover_skins() -> list:
                 kind="dafeiyu", path=None)]
     seen = {"dafeiyu"}
     # Codex 精灵图契约
-    for root, tag in [(skins_dir(), ""),
+    # **两个目录都要扫**：随包的（bundled）+ 用户装的（持久）。
+    # 只扫一个的话，exe 版要么看不见自带的，要么看不见装的。
+    for root, tag in [(bundled_skins_dir(), ""),
+                      (skins_dir(), ""),
                       (os.path.join(os.path.expanduser("~"), ".codex", "pets"), " (Codex)")]:
         try:
             names = sorted(os.listdir(root))

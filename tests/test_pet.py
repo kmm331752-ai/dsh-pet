@@ -470,14 +470,22 @@ class TestSkinInstall(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="dsh-pet-skin-")
         import pet_skin_install as SI
         self.SI = SI
-        # 改 assets_dir（唯一真实来源），不是 SI.SKINS_DIR 也不是 B.skins_dir ——
-        # skins_dir() 的函数体在 pet_base 的命名空间里解析 assets_dir，
-        # 所以只要改这一个，pet_render 和 pet_skin_install 看到的都跟着变。
+        # **两个都要改，原因是它们现在不是一棵树上的了。**
+        #
+        # 改之前：skins_dir() = assets_dir()/skins —— 只改 assets_dir 够。
+        # 换 exe 时改了设计：安装目标必须是**持久**的 data_dir()/skins，
+        # 因为 `--onefile` 的 app_dir() 是 _MEIPASS（退出就删）。
+        #
+        # 于是这里只改 assets_dir 的话，安装会落到**真的** data_dir() 里 ——
+        # 实测：跑一次测试就在仓库里留下 skins/test-skin。
         self._orig = B.assets_dir
+        self._orig_data = B.data_dir
         B.assets_dir = lambda: os.path.join(self.tmp, "assets")
+        B.data_dir = lambda: self.tmp
 
     def tearDown(self):
         B.assets_dir = self._orig
+        B.data_dir = self._orig_data
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _zip(self, name, files):
@@ -2721,6 +2729,46 @@ class TestConfig(unittest.TestCase):
         ids = {s["id"] for s in P.discover_skins()}
         self.assertIn("dafeiyu", ids)
         self.assertIn("kun-like", ids)
+
+
+class TestSkinPersistence(unittest.TestCase):
+    """装进去的皮肤必须是**持久**的。
+
+    踩过（换 exe 时才发现的）：`--onefile` 打包后 `app_dir()` 是
+    `sys._MEIPASS` —— 每次启动解压、退出就删。而 `skins_dir()` 原来是
+    `app_dir()/assets/skins`，正好在临时目录里。
+
+    **后果：exe 版从宠物库装的皮肤，重启就没了。** 源码运行看不出来
+    （那时 `app_dir()` 就是仓库目录），所以这个 bug 一直没暴露。
+    """
+
+    def test_skins_dir_is_under_data_dir(self):
+        """安装目标必须在可写、持久的 `data_dir()` 下面。"""
+        self.assertEqual(
+            os.path.dirname(os.path.abspath(B.skins_dir())),
+            os.path.abspath(B.data_dir()),
+            "skins_dir 不在 data_dir 下 —— 装进去的皮肤可能随临时目录消失")
+
+    def test_bundled_and_user_are_different_places(self):
+        """随包的和装的必须是两个目录，不能混。"""
+        self.assertNotEqual(os.path.abspath(B.skins_dir()),
+                            os.path.abspath(B.bundled_skins_dir()))
+
+    def test_discovery_scans_both(self):
+        """只扫一个的话，exe 版要么看不见自带的，要么看不见装的。"""
+        here = os.path.dirname(os.path.abspath(__file__))
+        src_path = os.path.join(os.path.dirname(here), "pet_render.py")
+        with open(src_path, encoding="utf-8") as fh:
+            src = fh.read()
+        i = src.index("def discover_skins")
+        body = src[i:i + 1600]
+        self.assertIn("bundled_skins_dir()", body, "discover_skins 没扫随包目录")
+        self.assertIn("skins_dir()", body, "discover_skins 没扫用户安装目录")
+
+    def test_builtin_skin_always_present(self):
+        import pet_render as R
+        ids = [k["id"] for k in R.discover_skins()]
+        self.assertIn("dafeiyu", ids, "内置皮肤没了")
 
 
 if __name__ == "__main__":
